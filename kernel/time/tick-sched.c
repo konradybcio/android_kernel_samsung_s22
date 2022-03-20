@@ -25,6 +25,7 @@
 #include <linux/posix-timers.h>
 #include <linux/context_tracking.h>
 #include <linux/mm.h>
+#include <trace/hooks/sched.h>
 
 #include <asm/irq_regs.h>
 
@@ -143,8 +144,10 @@ static void tick_sched_do_timer(struct tick_sched *ts, ktime_t now)
 #endif
 
 	/* Check, if the jiffies need an update */
-	if (tick_do_timer_cpu == cpu)
+	if (tick_do_timer_cpu == cpu) {
 		tick_do_update_jiffies64(now);
+		trace_android_vh_jiffies_update(NULL);
+	}
 
 	if (ts->inidle)
 		ts->got_idle_tick = 1;
@@ -1110,6 +1113,7 @@ ktime_t tick_nohz_get_sleep_length(ktime_t *delta_next)
 
 	return ktime_sub(next_event, now);
 }
+EXPORT_SYMBOL_GPL(tick_nohz_get_sleep_length);
 
 /**
  * tick_nohz_get_idle_calls_cpu - return the current idle calls counter value
@@ -1123,6 +1127,7 @@ unsigned long tick_nohz_get_idle_calls_cpu(int cpu)
 
 	return ts->idle_calls;
 }
+EXPORT_SYMBOL_GPL(tick_nohz_get_idle_calls_cpu);
 
 /**
  * tick_nohz_get_idle_calls - return the current idle calls counter value
@@ -1433,4 +1438,24 @@ int tick_check_oneshot_change(int allow_nohz)
 
 	tick_nohz_switch_to_nohz();
 	return 0;
+}
+
+static struct tick_sched saved_pcpu_ts[NR_CPUS];
+
+void save_pcpu_tick(int cpu)
+{
+	saved_pcpu_ts[cpu] = per_cpu(tick_cpu_sched, cpu);
+	kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE] =
+			ktime_to_ns(saved_pcpu_ts[cpu].idle_sleeptime);
+	kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT] =
+			ktime_to_ns(saved_pcpu_ts[cpu].iowait_sleeptime);
+}
+
+void restore_pcpu_tick(int cpu)
+{
+	struct tick_sched *ts = &per_cpu(tick_cpu_sched, cpu);
+
+	ts->idle_sleeptime = saved_pcpu_ts[cpu].idle_sleeptime;
+	ts->iowait_sleeptime = saved_pcpu_ts[cpu].iowait_sleeptime;
+	ts->idle_calls = saved_pcpu_ts[cpu].idle_calls;
 }

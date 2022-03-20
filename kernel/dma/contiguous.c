@@ -58,6 +58,7 @@
 #endif
 
 struct cma *dma_contiguous_default_area;
+EXPORT_SYMBOL_GPL(dma_contiguous_default_area);
 
 /*
  * Default global CMA area size can be defined in kernel's .config.
@@ -230,16 +231,21 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 {
 	int ret;
 
+	memblock_memsize_disable_tracking();
 	ret = cma_declare_contiguous(base, size, limit, 0, 0, fixed,
 					"reserved", res_cma);
 	if (ret)
-		return ret;
+		goto out;
 
 	/* Architecture specific contiguous memory fixup. */
 	dma_contiguous_early_fixup(cma_get_base(*res_cma),
 				cma_get_size(*res_cma));
 
-	return 0;
+	memblock_memsize_record("dma_cma", cma_get_base(*res_cma),
+				cma_get_size(*res_cma), false, true);
+out:
+	memblock_memsize_enable_tracking();
+	return ret;
 }
 
 /**
@@ -260,7 +266,8 @@ struct page *dma_alloc_from_contiguous(struct device *dev, size_t count,
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
-	return cma_alloc(dev_get_cma_area(dev), count, align, no_warn);
+	return cma_alloc(dev_get_cma_area(dev), count, align, GFP_KERNEL |
+			(no_warn ? __GFP_NOWARN : 0));
 }
 
 /**
@@ -283,7 +290,8 @@ static struct page *cma_alloc_aligned(struct cma *cma, size_t size, gfp_t gfp)
 {
 	unsigned int align = min(get_order(size), CONFIG_CMA_ALIGNMENT);
 
-	return cma_alloc(cma, size >> PAGE_SHIFT, align, gfp & __GFP_NOWARN);
+	return cma_alloc(cma, size >> PAGE_SHIFT, align,
+				GFP_KERNEL | (gfp & __GFP_NOWARN));
 }
 
 /**

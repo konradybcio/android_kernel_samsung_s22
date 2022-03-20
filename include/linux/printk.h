@@ -21,6 +21,9 @@ static inline int printk_get_level(const char *buffer)
 	if (buffer[0] == KERN_SOH_ASCII && buffer[1]) {
 		switch (buffer[1]) {
 		case '0' ... '7':
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+		case 'B' ... 'J':
+#endif
 		case 'c':	/* KERN_CONT */
 			return buffer[1];
 		}
@@ -206,6 +209,7 @@ void __init setup_log_buf(int early);
 __printf(1, 2) void dump_stack_set_arch_desc(const char *fmt, ...);
 void dump_stack_print_info(const char *log_lvl);
 void show_regs_print_info(const char *log_lvl);
+extern asmlinkage void dump_stack_lvl(const char *log_lvl) __cold;
 extern asmlinkage void dump_stack(void) __cold;
 extern void printk_safe_flush(void);
 extern void printk_safe_flush_on_panic(void);
@@ -266,6 +270,10 @@ static inline void dump_stack_print_info(const char *log_lvl)
 }
 
 static inline void show_regs_print_info(const char *log_lvl)
+{
+}
+
+static inline void dump_stack_lvl(const char *log_lvl)
 {
 }
 
@@ -383,6 +391,33 @@ extern int kptr_restrict;
  */
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
+
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+#define pr_auto(index, fmt, ...) \
+	printk(KERN_AUTO index pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_auto_disable(index) \
+	secdbg_comm_log_disable(index)
+#define pr_auto_once(index) \
+	secdbg_comm_log_once(index)
+
+#define ASL1	KERN_AUTO1
+#define ASL2	KERN_AUTO2
+#define ASL3	KERN_AUTO3
+#define ASL4	KERN_AUTO4
+#define ASL5	KERN_AUTO5
+#define ASL6	KERN_AUTO6
+#define ASL7	KERN_AUTO7
+#define ASL8	KERN_AUTO8
+#define ASL9	KERN_AUTO9
+
+#else
+/* TODO : retain the original log level */
+#define pr_auto(level, fmt, ...) \
+	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_auto_disable(index) do { } while (0)
+#define pr_auto_once(index) do { } while (0)
+
+#endif /* SEC_DEBUG_AUTO_COMMENT */
 
 /**
  * pr_devel - Print a debug-level message conditionally

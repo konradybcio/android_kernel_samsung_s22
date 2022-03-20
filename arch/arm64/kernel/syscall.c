@@ -14,6 +14,10 @@
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
+
 long compat_arm_syscall(struct pt_regs *regs, int scno);
 long sys_ni_syscall(void);
 
@@ -22,6 +26,10 @@ static long do_ni_syscall(struct pt_regs *regs, int scno)
 #ifdef CONFIG_COMPAT
 	long ret;
 	if (is_compat_task()) {
+#ifdef CONFIG_SECURITY_DEFEX
+		ret = defex_syscall_enter(scno, regs);
+		if (!ret)
+#endif /* CONFIG_SECURITY_DEFEX */
 		ret = compat_arm_syscall(regs, scno);
 		if (ret != -ENOSYS)
 			return ret;
@@ -45,6 +53,10 @@ static void invoke_syscall(struct pt_regs *regs, unsigned int scno,
 	if (scno < sc_nr) {
 		syscall_fn_t syscall_fn;
 		syscall_fn = syscall_table[array_index_nospec(scno, sc_nr)];
+#ifdef CONFIG_SECURITY_DEFEX
+		ret = defex_syscall_enter(scno, regs);
+		if (!ret)
+#endif /* CONFIG_SECURITY_DEFEX */
 		ret = __invoke_syscall(regs, syscall_fn);
 	} else {
 		ret = do_ni_syscall(regs, scno);
@@ -122,7 +134,7 @@ static void el0_svc_common(struct pt_regs *regs, int scno, int sc_nr,
 	cortex_a76_erratum_1463225_svc_handler();
 	local_daif_restore(DAIF_PROCCTX);
 
-	if (system_supports_mte() && (flags & _TIF_MTE_ASYNC_FAULT)) {
+	if (flags & _TIF_MTE_ASYNC_FAULT) {
 		/*
 		 * Process the asynchronous tag check fault before the actual
 		 * syscall. do_notify_resume() will send a signal to userspace

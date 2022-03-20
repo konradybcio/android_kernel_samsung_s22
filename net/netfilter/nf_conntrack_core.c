@@ -33,6 +33,7 @@
 #include <linux/mm.h>
 #include <linux/nsproxy.h>
 #include <linux/rculist_nulls.h>
+#include <trace/hooks/net.h>
 
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_l4proto.h>
@@ -52,8 +53,14 @@
 #include <net/netfilter/nf_nat_helper.h>
 #include <net/netns/hash.h>
 #include <net/ip.h>
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+#include <net/ncm.h>
+#endif
+// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 #include "nf_internals.h"
+#include <linux/time.h>
 
 __cacheline_aligned_in_smp spinlock_t nf_conntrack_locks[CONNTRACK_LOCKS];
 EXPORT_SYMBOL_GPL(nf_conntrack_locks);
@@ -66,22 +73,17 @@ EXPORT_SYMBOL_GPL(nf_conntrack_hash);
 
 struct conntrack_gc_work {
 	struct delayed_work	dwork;
-	u32			last_bucket;
+	u32			next_bucket;
 	bool			exiting;
 	bool			early_drop;
-	long			next_gc_run;
 };
 
 static __read_mostly struct kmem_cache *nf_conntrack_cachep;
 static DEFINE_SPINLOCK(nf_conntrack_locks_all_lock);
 static __read_mostly bool nf_conntrack_locks_all;
 
-/* every gc cycle scans at most 1/GC_MAX_BUCKETS_DIV part of table */
-#define GC_MAX_BUCKETS_DIV	128u
-/* upper bound of full table scan */
-#define GC_MAX_SCAN_JIFFIES	(16u * HZ)
-/* desired ratio of entries found to be expired */
-#define GC_EVICT_RATIO	50u
+#define GC_SCAN_INTERVAL	(120u * HZ)
+#define GC_SCAN_MAX_DURATION	msecs_to_jiffies(10)
 
 static struct conntrack_gc_work conntrack_gc_work;
 
@@ -498,6 +500,14 @@ static void nf_ct_add_to_dying_list(struct nf_conn *ct)
 {
 	struct ct_pcpu *pcpu;
 
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	if ( (check_ncm_flag()) && (ct != NULL) && (NF_CONN_NPA_VENDOR_DATA_GET(ct)) && (atomic_read(&NF_CONN_NPA_VENDOR_DATA_GET(ct)->startFlow)) ) {
+		knox_collect_conntrack_data(ct, NCM_FLOW_TYPE_CLOSE, 10);
+	}
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
+
 	/* add this conntrack to the (per cpu) dying list */
 	ct->cpu = smp_processor_id();
 	pcpu = per_cpu_ptr(nf_ct_net(ct)->ct.pcpu_lists, ct->cpu);
@@ -598,6 +608,15 @@ destroy_conntrack(struct nf_conntrack *nfct)
 {
 	struct nf_conn *ct = (struct nf_conn *)nfct;
 
+    // SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	if (NF_CONN_NPA_VENDOR_DATA_GET(ct)) {
+		kfree(NF_CONN_NPA_VENDOR_DATA_GET(ct));
+		ct->android_oem_data1 = (u64)NULL;
+	}
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
+
 	pr_debug("destroy_conntrack(%p)\n", ct);
 	WARN_ON(atomic_read(&nfct->use) != 0);
 
@@ -661,8 +680,13 @@ bool nf_ct_delete(struct nf_conn *ct, u32 portid, int report)
 		return false;
 
 	tstamp = nf_conn_tstamp_find(ct);
-	if (tstamp && tstamp->stop == 0)
+	if (tstamp) {
+		s32 timeout = ct->timeout - nfct_time_stamp;
+
 		tstamp->stop = ktime_get_real_ns();
+		if (timeout < 0)
+			tstamp->stop -= jiffies_to_nsecs(-timeout);
+	}
 
 	if (nf_conntrack_event_report(IPCT_DESTROY, ct,
 				    portid, report) < 0) {
@@ -1347,17 +1371,13 @@ static bool gc_worker_can_early_drop(const struct nf_conn *ct)
 
 static void gc_worker(struct work_struct *work)
 {
-	unsigned int min_interval = max(HZ / GC_MAX_BUCKETS_DIV, 1u);
-	unsigned int i, goal, buckets = 0, expired_count = 0;
-	unsigned int nf_conntrack_max95 = 0;
+	unsigned long end_time = jiffies + GC_SCAN_MAX_DURATION;
+	unsigned int i, hashsz, nf_conntrack_max95 = 0;
+	unsigned long next_run = GC_SCAN_INTERVAL;
 	struct conntrack_gc_work *gc_work;
-	unsigned int ratio, scanned = 0;
-	unsigned long next_run;
-
 	gc_work = container_of(work, struct conntrack_gc_work, dwork.work);
 
-	goal = nf_conntrack_htable_size / GC_MAX_BUCKETS_DIV;
-	i = gc_work->last_bucket;
+	i = gc_work->next_bucket;
 	if (gc_work->early_drop)
 		nf_conntrack_max95 = nf_conntrack_max / 100u * 95u;
 
@@ -1365,22 +1385,21 @@ static void gc_worker(struct work_struct *work)
 		struct nf_conntrack_tuple_hash *h;
 		struct hlist_nulls_head *ct_hash;
 		struct hlist_nulls_node *n;
-		unsigned int hashsz;
 		struct nf_conn *tmp;
 
-		i++;
 		rcu_read_lock();
 
 		nf_conntrack_get_ht(&ct_hash, &hashsz);
-		if (i >= hashsz)
-			i = 0;
+		if (i >= hashsz) {
+			rcu_read_unlock();
+			break;
+		}
 
 		hlist_nulls_for_each_entry_rcu(h, n, &ct_hash[i], hnnode) {
 			struct net *net;
 
 			tmp = nf_ct_tuplehash_to_ctrack(h);
 
-			scanned++;
 			if (test_bit(IPS_OFFLOAD_BIT, &tmp->status)) {
 				nf_ct_offload_timeout(tmp);
 				continue;
@@ -1388,8 +1407,17 @@ static void gc_worker(struct work_struct *work)
 
 			if (nf_ct_is_expired(tmp)) {
 				nf_ct_gc_expired(tmp);
-				expired_count++;
 				continue;
+			// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+			} else if ( (tmp != NULL) && (check_ncm_flag()) && (check_intermediate_flag()) && (NF_CONN_NPA_VENDOR_DATA_GET(tmp)) && (atomic_read(&NF_CONN_NPA_VENDOR_DATA_GET(tmp)->startFlow)) && (atomic_read(&NF_CONN_NPA_VENDOR_DATA_GET(tmp)->intermediateFlow)) ) {
+				s32 npa_timeout = NF_CONN_NPA_VENDOR_DATA_GET(tmp)->npa_timeout - ((u32)(jiffies));
+				if (npa_timeout <= 0) {
+					NF_CONN_NPA_VENDOR_DATA_GET(tmp)->npa_timeout = ((u32)(jiffies)) + (get_intermediate_timeout() * HZ);
+					knox_collect_conntrack_data(tmp, NCM_FLOW_TYPE_INTERMEDIATE, 20);
+			}
+#endif
+			// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 			}
 
 			if (nf_conntrack_max95 == 0 || gc_worker_skip_ct(tmp))
@@ -1420,7 +1448,14 @@ static void gc_worker(struct work_struct *work)
 		 */
 		rcu_read_unlock();
 		cond_resched();
-	} while (++buckets < goal);
+		i++;
+
+		if (time_after(jiffies, end_time) && i < hashsz) {
+			gc_work->next_bucket = i;
+			next_run = 0;
+			break;
+		}
+	} while (i < hashsz);
 
 	if (gc_work->exiting)
 		return;
@@ -1431,40 +1466,17 @@ static void gc_worker(struct work_struct *work)
 	 *
 	 * This worker is only here to reap expired entries when system went
 	 * idle after a busy period.
-	 *
-	 * The heuristics below are supposed to balance conflicting goals:
-	 *
-	 * 1. Minimize time until we notice a stale entry
-	 * 2. Maximize scan intervals to not waste cycles
-	 *
-	 * Normally, expire ratio will be close to 0.
-	 *
-	 * As soon as a sizeable fraction of the entries have expired
-	 * increase scan frequency.
 	 */
-	ratio = scanned ? expired_count * 100 / scanned : 0;
-	if (ratio > GC_EVICT_RATIO) {
-		gc_work->next_gc_run = min_interval;
-	} else {
-		unsigned int max = GC_MAX_SCAN_JIFFIES / GC_MAX_BUCKETS_DIV;
-
-		BUILD_BUG_ON((GC_MAX_SCAN_JIFFIES / GC_MAX_BUCKETS_DIV) == 0);
-
-		gc_work->next_gc_run += min_interval;
-		if (gc_work->next_gc_run > max)
-			gc_work->next_gc_run = max;
+	if (next_run) {
+		gc_work->early_drop = false;
+		gc_work->next_bucket = 0;
 	}
-
-	next_run = gc_work->next_gc_run;
-	gc_work->last_bucket = i;
-	gc_work->early_drop = false;
 	queue_delayed_work(system_power_efficient_wq, &gc_work->dwork, next_run);
 }
 
 static void conntrack_gc_work_init(struct conntrack_gc_work *gc_work)
 {
 	INIT_DEFERRABLE_WORK(&gc_work->dwork, gc_worker);
-	gc_work->next_gc_run = HZ;
 	gc_work->exiting = false;
 }
 
@@ -1476,6 +1488,11 @@ __nf_conntrack_alloc(struct net *net,
 		     gfp_t gfp, u32 hash)
 {
 	struct nf_conn *ct;
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	struct timespec64 open_timespec;
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 	/* We don't want any race condition at early drop stage */
 	atomic_inc(&net->ct.count);
@@ -1500,6 +1517,11 @@ __nf_conntrack_alloc(struct net *net,
 		goto out;
 
 	spin_lock_init(&ct->lock);
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	ct->android_oem_data1 = (u64)NULL;
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 	ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple = *orig;
 	ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode.pprev = NULL;
 	ct->tuplehash[IP_CT_DIR_REPLY].tuple = *repl;
@@ -1513,6 +1535,17 @@ __nf_conntrack_alloc(struct net *net,
 	       offsetof(struct nf_conn, __nfct_init_offset));
 
 	nf_ct_zone_add(ct, zone);
+
+	trace_android_rvh_nf_conn_alloc(ct);
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	ct->android_oem_data1 = (u64)kzalloc(sizeof(struct nf_conn_npa_vendor_data), gfp);
+	ktime_get_ts64(&open_timespec);
+	if (NF_CONN_NPA_VENDOR_DATA_GET(ct) != NULL){
+		NF_CONN_NPA_VENDOR_DATA_GET(ct)->open_time = open_timespec.tv_sec;
+	}
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
 
 	/* Because we use RCU lookups, we set ct_general.use to zero before
 	 * this is inserted in any list.
@@ -1546,6 +1579,15 @@ void nf_conntrack_free(struct nf_conn *ct)
 	nf_ct_ext_destroy(ct);
 	kmem_cache_free(nf_conntrack_cachep, ct);
 	smp_mb__before_atomic();
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA {
+#ifdef CONFIG_KNOX_NCM
+	if (NF_CONN_NPA_VENDOR_DATA_GET(ct)) {
+		kfree(NF_CONN_NPA_VENDOR_DATA_GET(ct));
+		ct->android_oem_data1 = (u64)NULL;
+	}
+#endif
+	// SEC_PRODUCT_FEATURE_KNOX_SUPPORT_NPA }
+	trace_android_rvh_nf_conn_free(ct);
 	atomic_dec(&net->ct.count);
 }
 EXPORT_SYMBOL_GPL(nf_conntrack_free);

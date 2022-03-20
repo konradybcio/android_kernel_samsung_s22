@@ -23,6 +23,7 @@ obj-y +=	no-block.o
 endif
 
 obj-$(CONFIG_PROC_FS) += proc_namespace.o
+obj-$(CONFIG_PROC_DLOG) += dlog_hook.o
 
 obj-y				+= notify/
 obj-$(CONFIG_EPOLL)		+= eventpoll.o
@@ -84,6 +85,7 @@ obj-$(CONFIG_CODA_FS)		+= coda/
 obj-$(CONFIG_MINIX_FS)		+= minix/
 obj-$(CONFIG_FAT_FS)		+= fat/
 obj-$(CONFIG_EXFAT_FS)		+= exfat/
+obj-$(CONFIG_SDFAT_FS)		+= sdfat/
 obj-$(CONFIG_BFS_FS)		+= bfs/
 obj-$(CONFIG_ISO9660_FS)	+= isofs/
 obj-$(CONFIG_HFSPLUS_FS)	+= hfsplus/ # Before hfs to find wrapped HFS+
@@ -113,6 +115,7 @@ obj-$(CONFIG_ADFS_FS)		+= adfs/
 obj-$(CONFIG_FUSE_FS)		+= fuse/
 obj-$(CONFIG_OVERLAY_FS)	+= overlayfs/
 obj-$(CONFIG_ORANGEFS_FS)       += orangefs/
+obj-$(CONFIG_INCREMENTAL_FS)	+= incfs/
 obj-$(CONFIG_UDF_FS)		+= udf/
 obj-$(CONFIG_SUN_OPENPROMFS)	+= openpromfs/
 obj-$(CONFIG_OMFS_FS)		+= omfs/

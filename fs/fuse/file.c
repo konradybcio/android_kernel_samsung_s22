@@ -18,6 +18,7 @@
 #include <linux/swap.h>
 #include <linux/falloc.h>
 #include <linux/uio.h>
+#include <linux/sched/mm.h>
 #include <linux/fs.h>
 
 static struct page **fuse_pages_alloc(unsigned int npages, gfp_t flags,
@@ -152,7 +153,7 @@ int fuse_do_open(struct fuse_mount *fm, u64 nodeid, struct file *file,
 		if (!err) {
 			ff->fh = outarg.fh;
 			ff->open_flags = outarg.open_flags;
-
+			fuse_passthrough_setup(fc, ff, &outarg);
 		} else if (err != -ENOSYS) {
 			fuse_file_free(ff);
 			return err;
@@ -164,7 +165,15 @@ int fuse_do_open(struct fuse_mount *fm, u64 nodeid, struct file *file,
 		}
 	}
 
+	/*
+	 * Ignores FOPEN_DIRECT_IO from the fuse daemon when user does not
+	 * explicitly request direct IO. This is fine since we invalidate the fuse
+	 * page cache when the lower file is updated with passthrough.
+	 */
 	if (isdir)
+		ff->open_flags &= ~FOPEN_DIRECT_IO;
+	else if (fc->passthrough && !(file->f_flags & O_DIRECT) &&
+		 (ff->open_flags & FOPEN_DIRECT_IO))
 		ff->open_flags &= ~FOPEN_DIRECT_IO;
 
 	ff->nodeid = nodeid;
@@ -297,6 +306,8 @@ void fuse_release_common(struct file *file, bool isdir)
 	struct fuse_file *ff = file->private_data;
 	struct fuse_release_args *ra = ff->release_args;
 	int opcode = isdir ? FUSE_RELEASEDIR : FUSE_RELEASE;
+
+	fuse_passthrough_release(&ff->passthrough);
 
 	fuse_prepare_release(fi, ff, file->f_flags, opcode);
 
@@ -439,7 +450,7 @@ static void fuse_wait_on_page_writeback(struct inode *inode, pgoff_t index)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
 
-	wait_event(fi->page_waitq, !fuse_page_is_writeback(inode, index));
+	fuse_wait_event(fi->page_waitq, !fuse_page_is_writeback(inode, index));
 }
 
 /*
@@ -1581,7 +1592,9 @@ static ssize_t fuse_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (FUSE_IS_DAX(inode))
 		return fuse_dax_read_iter(iocb, to);
 
-	if (!(ff->open_flags & FOPEN_DIRECT_IO))
+	if (ff->passthrough.filp)
+		return fuse_passthrough_read_iter(iocb, to);
+	else if (!(ff->open_flags & FOPEN_DIRECT_IO))
 		return fuse_cache_read_iter(iocb, to);
 	else
 		return fuse_direct_read_iter(iocb, to);
@@ -1599,7 +1612,9 @@ static ssize_t fuse_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (FUSE_IS_DAX(inode))
 		return fuse_dax_write_iter(iocb, from);
 
-	if (!(ff->open_flags & FOPEN_DIRECT_IO))
+	if (ff->passthrough.filp)
+		return fuse_passthrough_write_iter(iocb, from);
+	else if (!(ff->open_flags & FOPEN_DIRECT_IO))
 		return fuse_cache_write_iter(iocb, from);
 	else
 		return fuse_direct_write_iter(iocb, from);
@@ -1845,12 +1860,15 @@ int fuse_write_inode(struct inode *inode, struct writeback_control *wbc)
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	struct fuse_file *ff;
 	int err;
+	/* @fs.sec -- E8B3F75DDB82DFE8F52508F039ABE4FF -- */
+	unsigned int nofs_flag = memalloc_nofs_save();
 
 	ff = __fuse_write_file_get(fc, fi);
 	err = fuse_flush_times(inode, ff);
 	if (ff)
 		fuse_file_put(ff, false, false);
 
+	memalloc_nofs_restore(nofs_flag);
 	return err;
 }
 
@@ -2371,6 +2389,9 @@ static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 	/* DAX mmap is superior to direct_io mmap */
 	if (FUSE_IS_DAX(file_inode(file)))
 		return fuse_dax_mmap(file, vma);
+
+	if (ff->passthrough.filp)
+		return fuse_passthrough_mmap(file, vma);
 
 	if (ff->open_flags & FOPEN_DIRECT_IO) {
 		/* Can't provide the coherency needed for MAP_SHARED */

@@ -1718,11 +1718,14 @@ static void ffs_data_closed(struct ffs_data *ffs)
 	if (atomic_dec_and_test(&ffs->opened)) {
 		if (ffs->no_disconnect) {
 			ffs->state = FFS_DEACTIVATED;
+			/* Blocking inode NULL */
+			mutex_lock(&ffs->mutex);
 			if (ffs->epfiles) {
 				ffs_epfiles_destroy(ffs->epfiles,
 						   ffs->eps_count);
 				ffs->epfiles = NULL;
 			}
+			mutex_unlock(&ffs->mutex);
 			if (ffs->setup_state == FFS_SETUP_PENDING)
 				__ffs_ep0_stall(ffs);
 		} else {
@@ -1775,8 +1778,13 @@ static void ffs_data_clear(struct ffs_data *ffs)
 
 	BUG_ON(ffs->gadget);
 
-	if (ffs->epfiles)
+	/* Blocking inode NULL */
+	mutex_lock(&ffs->mutex);
+	if (ffs->epfiles) {
 		ffs_epfiles_destroy(ffs->epfiles, ffs->eps_count);
+		ffs->epfiles = NULL;
+	}
+	mutex_unlock(&ffs->mutex);
 
 	if (ffs->ffs_eventfd)
 		eventfd_ctx_put(ffs->ffs_eventfd);
@@ -1792,7 +1800,6 @@ static void ffs_data_reset(struct ffs_data *ffs)
 
 	ffs_data_clear(ffs);
 
-	ffs->epfiles = NULL;
 	ffs->raw_descs_data = NULL;
 	ffs->raw_descs = NULL;
 	ffs->raw_strings = NULL;
@@ -3227,6 +3234,10 @@ static int _ffs_func_bind(struct usb_configuration *c,
 	func->function.os_desc_n =
 		c->cdev->use_os_string ? ffs->interfaces_count : 0;
 
+	if (likely(super)) {
+		func->function.ssp_descriptors =
+			usb_copy_descriptors(func->function.ss_descriptors);
+	}
 	/* And we're done */
 	ffs_event_add(ffs, FUNCTIONFS_BIND);
 	return 0;
@@ -3359,6 +3370,7 @@ static int ffs_func_setup(struct usb_function *f,
 	}
 
 	spin_lock_irqsave(&ffs->ev.waitq.lock, flags);
+
 	ffs->ev.setup = *creq;
 	ffs->ev.setup.wIndex = cpu_to_le16(ret);
 	__ffs_event_add(ffs, FUNCTIONFS_SETUP);
@@ -3565,6 +3577,9 @@ static void ffs_func_unbind(struct usb_configuration *c,
 		ffs_func_eps_disable(func);
 		ffs->func = NULL;
 	}
+
+	/* Drain any pending AIO completions */
+	drain_workqueue(ffs->io_completion_wq);
 
 	if (!--opts->refcnt)
 		functionfs_unbind(ffs);

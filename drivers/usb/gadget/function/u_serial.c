@@ -258,9 +258,7 @@ __acquires(&port->port_lock)
 		list_del(&req->list);
 		req->zero = kfifo_is_empty(&port->port_write_buf);
 
-		pr_vdebug("ttyGS%d: tx len=%d, 0x%02x 0x%02x 0x%02x ...\n",
-			  port->port_num, len, *((u8 *)req->buf),
-			  *((u8 *)req->buf+1), *((u8 *)req->buf+2));
+		pr_vdebug("ttyGS%d: tx len=%d, %3ph ...\n", port->port_num, len, req->buf);
 
 		/* Drop lock while we call out of driver; completions
 		 * could be issued while we do so.  Disconnection may
@@ -346,7 +344,7 @@ __acquires(&port->port_lock)
 }
 
 /*
- * RX tasklet takes data out of the RX queue and hands it up to the TTY
+ * RX work takes data out of the RX queue and hands it up to the TTY
  * layer until it refuses to take any more data (or is throttled back).
  * Then it issues reads for any further data.
  *
@@ -452,6 +450,15 @@ static void gs_read_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct gs_port	*port = ep->driver_data;
 
+	/*
+	 * Port became NULL when 'dwc3_gadget_pullup' returns ETIMEDOUT.
+	 * Return here to avoid panic.
+	 */
+	if (!port) {
+		pr_err("%s, failed to get port\n", __func__);
+		return;
+	}
+
 	/* Queue all received data until the tty layer is ready for it. */
 	spin_lock(&port->port_lock);
 	list_add_tail(&req->list, &port->read_queue);
@@ -462,6 +469,15 @@ static void gs_read_complete(struct usb_ep *ep, struct usb_request *req)
 static void gs_write_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct gs_port	*port = ep->driver_data;
+
+	/*
+	 * port became NULL when 'dwc3_gadget_pullup' returns ETIMEDOUT.
+	 * Return here to avoid panic.
+	 */
+	if (!port) {
+		pr_err("%s, failed to get port\n", __func__);
+		return;
+	}
 
 	spin_lock(&port->port_lock);
 	list_add(&req->list, &port->write_pool);
@@ -547,6 +563,12 @@ static int gs_start_io(struct gs_port *port)
 	 * configurations may use different endpoints with a given port;
 	 * and high speed vs full speed changes packet sizes too.
 	 */
+	 
+	if (!ep->enabled || !port->port_usb->in->enabled) {
+		pr_err("%s: ep is disabled.\n", __func__);
+		return -ENODEV;
+	}
+	
 	status = gs_alloc_requests(ep, head, gs_read_complete,
 		&port->read_allocated);
 	if (status)
@@ -567,7 +589,8 @@ static int gs_start_io(struct gs_port *port)
 		gs_start_tx(port);
 		/* Unblock any pending writes into our circular buffer, in case
 		 * we didn't in gs_start_tx() */
-		tty_wakeup(port->port.tty);
+		if (port->port.tty)
+			tty_wakeup(port->port.tty);
 	} else {
 		gs_free_requests(ep, head, &port->read_allocated);
 		gs_free_requests(port->port_usb->in, &port->write_pool,
@@ -709,7 +732,7 @@ raced_with_open:
 
 	/* Iff we're disconnected, there can be no I/O in flight so it's
 	 * ok to free the circular buffer; else just scrub it.  And don't
-	 * let the push tasklet fire again until we're re-opened.
+	 * let the push async work fire again until we're re-opened.
 	 */
 	if (gser == NULL)
 		kfifo_free(&port->port_write_buf);

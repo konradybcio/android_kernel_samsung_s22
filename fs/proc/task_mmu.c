@@ -123,6 +123,56 @@ static void release_task_mempolicy(struct proc_maps_private *priv)
 }
 #endif
 
+static void seq_print_vma_name(struct seq_file *m, struct vm_area_struct *vma)
+{
+	const char __user *name = vma_get_anon_name(vma);
+	struct mm_struct *mm = vma->vm_mm;
+
+	unsigned long page_start_vaddr;
+	unsigned long page_offset;
+	unsigned long num_pages;
+	unsigned long max_len = NAME_MAX;
+	int i;
+
+	page_start_vaddr = (unsigned long)name & PAGE_MASK;
+	page_offset = (unsigned long)name - page_start_vaddr;
+	num_pages = DIV_ROUND_UP(page_offset + max_len, PAGE_SIZE);
+
+	seq_puts(m, "[anon:");
+
+	for (i = 0; i < num_pages; i++) {
+		int len;
+		int write_len;
+		const char *kaddr;
+		long pages_pinned;
+		struct page *page;
+
+		pages_pinned = get_user_pages_remote(mm, page_start_vaddr, 1, 0,
+						     &page, NULL, NULL);
+		if (pages_pinned < 1) {
+			seq_puts(m, "<fault>]");
+			return;
+		}
+
+		kaddr = (const char *)kmap(page);
+		len = min(max_len, PAGE_SIZE - page_offset);
+		write_len = strnlen(kaddr + page_offset, len);
+		seq_write(m, kaddr + page_offset, write_len);
+		kunmap(page);
+		put_user_page(page);
+
+		/* if strnlen hit a null terminator then we're done */
+		if (write_len != len)
+			break;
+
+		max_len -= len;
+		page_offset = 0;
+		page_start_vaddr += PAGE_SIZE;
+	}
+
+	seq_putc(m, ']');
+}
+
 static void *m_start(struct seq_file *m, loff_t *ppos)
 {
 	struct proc_maps_private *priv = m->private;
@@ -319,8 +369,15 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 			goto done;
 		}
 
-		if (is_stack(vma))
+		if (is_stack(vma)) {
 			name = "[stack]";
+			goto done;
+		}
+
+		if (vma_get_anon_name(vma)) {
+			seq_pad(m, ' ');
+			seq_print_vma_name(m, vma);
+		}
 	}
 
 done:
@@ -389,6 +446,9 @@ struct mem_size_stats {
 	unsigned long shmem_thp;
 	unsigned long file_thp;
 	unsigned long swap;
+#if IS_ENABLED(CONFIG_ZRAM)
+	unsigned long writeback;
+#endif
 	unsigned long shared_hugetlb;
 	unsigned long private_hugetlb;
 	u64 pss;
@@ -505,6 +565,10 @@ static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 			int mapcount;
 
 			mss->swap += PAGE_SIZE;
+#if IS_ENABLED(CONFIG_ZRAM)
+			if (zram_oem_fn && zram_oem_fn(ZRAM_IS_WRITEBACK_ENTRY, NULL, swp_offset(swpent)))
+				mss->writeback += PAGE_SIZE;
+#endif
 			mapcount = swp_swapcount(swpent);
 			if (mapcount >= 2) {
 				u64 pss_delta = (u64)PAGE_SIZE << PSS_SHIFT;
@@ -661,6 +725,9 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 		[ilog2(VM_PKEY_BIT4)]	= "",
 #endif
 #endif /* CONFIG_ARCH_HAS_PKEYS */
+#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
+		[ilog2(VM_UFFD_MINOR)]	= "ui",
+#endif /* CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
 	};
 	size_t i;
 
@@ -805,6 +872,9 @@ static void __show_smap(struct seq_file *m, const struct mem_size_stats *mss,
 	SEQ_PUT_DEC(" kB\nSwap:           ", mss->swap);
 	SEQ_PUT_DEC(" kB\nSwapPss:        ",
 					mss->swap_pss >> PSS_SHIFT);
+#if IS_ENABLED(CONFIG_ZRAM)
+	SEQ_PUT_DEC(" kB\nWriteback:      ", mss->writeback);
+#endif
 	SEQ_PUT_DEC(" kB\nLocked:         ",
 					mss->pss_locked >> PSS_SHIFT);
 	seq_puts(m, " kB\n");
@@ -820,6 +890,11 @@ static int show_smap(struct seq_file *m, void *v)
 	smap_gather_stats(vma, &mss, 0);
 
 	show_map_vma(m, vma);
+	if (vma_get_anon_name(vma)) {
+		seq_puts(m, "Name:           ");
+		seq_print_vma_name(m, vma);
+		seq_putc(m, '\n');
+	}
 
 	SEQ_PUT_DEC("Size:           ", vma->vm_end - vma->vm_start);
 	SEQ_PUT_DEC(" kB\nKernelPageSize: ", vma_kernel_pagesize(vma));
@@ -1252,8 +1327,11 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 			for (vma = mm->mmap; vma; vma = vma->vm_next) {
 				if (!(vma->vm_flags & VM_SOFTDIRTY))
 					continue;
-				vma->vm_flags &= ~VM_SOFTDIRTY;
+				vm_write_begin(vma);
+				WRITE_ONCE(vma->vm_flags,
+					vma->vm_flags & ~VM_SOFTDIRTY);
 				vma_set_page_prot(vma);
+				vm_write_end(vma);
 			}
 
 			inc_tlb_flush_pending(mm);
@@ -1955,3 +2033,182 @@ const struct file_operations proc_pid_numa_maps_operations = {
 };
 
 #endif /* CONFIG_NUMA */
+
+#ifdef CONFIG_PAGE_BOOST
+/*
+ * Currently, target_file_name is shared by all filemap_info nodes
+ * as we do not access this node in parallel. (do not need synchronization also)
+ */
+#include <linux/io_record.h>
+#include <linux/atomic.h>
+static atomic_t filemap_fd_opened = ATOMIC_INIT(0);
+char target_file_name[MAX_PAGE_BOOST_FILEPATH_LEN + 1] = "";
+
+static inline bool try_to_get_filemap_fd(void)
+{
+	/* only 1 context is allowed at a time */
+	if (atomic_inc_return(&filemap_fd_opened) == 1) {
+		return true;
+	} else {
+		atomic_dec(&filemap_fd_opened);
+		return false;
+	}
+}
+
+static inline void put_filemap_fd(void)
+{
+	atomic_dec(&filemap_fd_opened);
+}
+
+static void
+show_filemap_vma(struct seq_file *m, struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct proc_filemap_private *priv = m->private;
+	char strbuf[MAX_PAGE_BOOST_FILEPATH_LEN];
+	char *pathname;
+
+	if (!file)
+		return;
+
+	pathname = d_path(&file->f_path, strbuf, MAX_PAGE_BOOST_FILEPATH_LEN);
+	if (IS_ERR(pathname))
+		return;
+
+	if (priv->show_list) {
+		if (!strncmp(pathname, "/data", 5) ||
+			!strncmp(pathname, "/system", 7)) {
+			seq_puts(m, pathname);
+			seq_putc(m, '\n');
+		}
+	}
+}
+
+static int show_filemap(struct seq_file *m, void *v)
+{
+	show_filemap_vma(m, v);
+	return 0;
+}
+
+static const struct seq_operations proc_pid_filemap_op = {
+	.start	= m_start,
+	.next	= m_next,
+	.stop	= m_stop,
+	.show	= show_filemap,
+};
+
+static int pid_filemap_list_open(struct inode *inode, struct file *file)
+{
+	int psize = sizeof(struct proc_filemap_private);
+	const struct seq_operations *ops = &proc_pid_filemap_op;
+	struct proc_filemap_private *priv = __seq_open_private(file, ops,
+							       psize);
+
+	if (!priv)
+		return -ENOMEM;
+	if (!try_to_get_filemap_fd())
+		return -EINVAL;
+
+	priv->maps_private.inode = inode;
+	priv->maps_private.mm = proc_mem_open(inode, PTRACE_MODE_READ);
+	priv->show_list = true;
+	if (IS_ERR(priv->maps_private.mm)) {
+		int err = PTR_ERR(priv->maps_private.mm);
+
+		put_filemap_fd();
+		seq_release_private(inode, file);
+		return err;
+	}
+
+	return 0;
+}
+
+/* common release for filemap_list and filemap_info */
+static int proc_filemap_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+	struct proc_filemap_private *priv = seq->private;
+
+	if (priv->maps_private.mm)
+		mmdrop(priv->maps_private.mm);
+
+	put_filemap_fd();
+	return seq_release_private(inode, file);
+}
+
+/* List mapped files for this process */
+const struct file_operations proc_pid_filemap_list_operations = {
+	.open		= pid_filemap_list_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= proc_filemap_release,
+};
+
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+static ssize_t pid_io_record_read(struct file *file, char __user *buf,
+			size_t count, loff_t *ppos)
+{
+	return read_record(buf, count, ppos);
+}
+
+static ssize_t pid_io_record_write(struct file *file,
+					       const char __user *buf,
+					       size_t count, loff_t *ppos)
+{
+	char buffer[PROC_NUMBUF];
+	int itype;
+	enum io_record_cmd_types type;
+	int rv;
+	struct task_struct *task;
+	bool ret = true;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+	if (copy_from_user(buffer, buf, count))
+		return -EFAULT;
+	rv = kstrtoint(strstrip(buffer), 10, &itype);
+	if (rv < 0)
+		return rv;
+
+	task = get_proc_task(file_inode(file));
+	if (!task)
+		return -EFAULT;
+
+	type = (enum io_record_cmd_types)itype;
+	if (type < IO_RECORD_INIT || type > IO_RECORD_POST_PROCESSING) {
+		put_task_struct(task);
+		return -EINVAL;
+	}
+
+	switch (type) {
+	case IO_RECORD_INIT:
+		ret = init_record();
+		break;
+	case IO_RECORD_START:
+		ret = start_record((int)task_pid_nr(task));
+		break;
+	case IO_RECORD_STOP:
+		ret = stop_record();
+		break;
+	case IO_RECORD_POST_PROCESSING:
+		ret = post_processing_records();
+		break;
+	default:
+		break;
+	}
+	put_task_struct(task);
+
+	if (!ret)
+		count = -EINVAL;
+
+	return count;
+}
+
+const struct file_operations proc_pid_io_record_operations = {
+	.read		= pid_io_record_read,
+	.write		= pid_io_record_write,
+	.llseek		= noop_llseek,
+};
+#endif
+#endif

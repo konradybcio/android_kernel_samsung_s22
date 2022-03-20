@@ -10,6 +10,7 @@
 #include <linux/ioprio.h>
 /* struct bio, bio_vec and BIO_* flags are defined in blk_types.h */
 #include <linux/blk_types.h>
+#include <linux/android_kabi.h>
 
 #define BIO_DEBUG
 
@@ -20,6 +21,7 @@
 #endif
 
 #define BIO_MAX_PAGES		256
+#define BIO_MAX_BYTES		(BIO_MAX_PAGES * PAGE_SIZE)
 
 #define bio_prio(bio)			(bio)->bi_ioprio
 #define bio_set_prio(bio, prio)		((bio)->bi_ioprio = prio)
@@ -113,7 +115,7 @@ static inline bool bio_full(struct bio *bio, unsigned len)
 	if (bio->bi_vcnt >= bio->bi_max_vecs)
 		return true;
 
-	if (bio->bi_iter.bi_size > UINT_MAX - len)
+	if (bio->bi_iter.bi_size > BIO_MAX_BYTES - len)
 		return true;
 
 	return false;
@@ -325,6 +327,10 @@ struct bio_integrity_payload {
 	struct work_struct	bip_work;	/* I/O completion */
 
 	struct bio_vec		*bip_vec;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+
 	struct bio_vec		bip_inline_vecs[];/* embedded bvec array */
 };
 
@@ -698,6 +704,11 @@ struct bio_set {
 	struct bio_list		rescue_list;
 	struct work_struct	rescue_work;
 	struct workqueue_struct	*rescue_workqueue;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 struct biovec_slab {

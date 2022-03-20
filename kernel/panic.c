@@ -32,6 +32,9 @@
 #include <linux/ratelimit.h>
 #include <linux/debugfs.h>
 #include <asm/sections.h>
+#ifdef CONFIG_ARM64
+#include <asm/daifflags.h>
+#endif
 
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
@@ -222,7 +225,7 @@ void panic(const char *fmt, ...)
 	if (len && buf[len - 1] == '\n')
 		buf[len - 1] = '\0';
 
-	pr_emerg("Kernel panic - not syncing: %s\n", buf);
+	pr_auto(ASL5, "Kernel panic - not syncing: %s\n", buf);
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
@@ -676,6 +679,17 @@ device_initcall(register_warn_debugfs);
 #endif
 
 #ifdef CONFIG_STACKPROTECTOR
+#ifdef CONFIG_S3C2410_BUILTIN_WATCHDOG
+extern int s3c2410wdt_builtin_expire_watchdog(void);
+
+static __always_inline void __call_expire_watchdog(void)
+{
+	s3c2410wdt_builtin_expire_watchdog();
+	mdelay(10000);
+}
+#else
+static inline void __call_expire_watchdog(void) { }
+#endif /* CONFIG_S3C2410_BUILTIN_WATCHDOG */
 
 /*
  * Called when gcc's -fstack-protector feature is used, and
@@ -683,7 +697,25 @@ device_initcall(register_warn_debugfs);
  */
 __visible noinstr void __stack_chk_fail(void)
 {
+#ifdef CONFIG_ARM64
+	long tempx8 = 0, tempx9 = 0;
+#endif
 	instrumentation_begin();
+
+#ifdef CONFIG_ARM64
+	__asm__ __volatile__ ("mov %0, x8" : "=r" (tempx8));
+	__asm__ __volatile__ ("mov %0, x9" : "=r" (tempx9));
+
+	pr_auto(ASL1, "__stack_chk_fail: x8[%lx] x9[%lx]\n", tempx8, tempx9);
+	pr_auto(ASL1, "    prev fp:0x%lx\n", __builtin_frame_address(1));
+	pr_auto(ASL1, " current sp:0x%lx\n", current_stack_pointer);
+	pr_auto(ASL1, "stack-protector: Kernel stack is corrupted in: %pB\n",
+		__builtin_return_address(0));
+
+	local_daif_mask();
+
+	__call_expire_watchdog();
+#endif
 	panic("stack-protector: Kernel stack is corrupted in: %pB",
 		__builtin_return_address(0));
 	instrumentation_end();

@@ -27,6 +27,10 @@
 #include <asm/irq_regs.h>
 #include <linux/kvm_para.h>
 
+#include <trace/hooks/softlockup.h>
+
+#include <linux/sec_debug.h>
+
 static DEFINE_MUTEX(watchdog_mutex);
 
 #if defined(CONFIG_HARDLOCKUP_DETECTOR) || defined(CONFIG_HAVE_NMI_WATCHDOG)
@@ -405,13 +409,17 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		/* Start period for the next softlockup warning. */
 		update_touch_ts();
 
-		pr_emerg("BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
+		pr_auto(ASL9, "BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
 			smp_processor_id(), duration,
 			current->comm, task_pid_nr(current));
 		print_modules();
 		print_irqtrace_events(current);
 		if (regs)
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+			show_regs_auto_comment(regs, !!softlockup_panic);
+#else
 			show_regs(regs);
+#endif
 		else
 			dump_stack();
 
@@ -420,6 +428,7 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 			clear_bit_unlock(0, &soft_lockup_nmi_warn);
 		}
 
+		trace_android_vh_watchdog_timer_softlockup(duration, regs, !!softlockup_panic);
 		add_taint(TAINT_SOFTLOCKUP, LOCKDEP_STILL_OK);
 		if (softlockup_panic)
 			panic("softlockup: hung tasks");

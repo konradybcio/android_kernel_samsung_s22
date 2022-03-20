@@ -10,6 +10,7 @@
 #define _KUNIT_TEST_H
 
 #include <kunit/assert.h>
+#include <kunit/kunit-stream.h>
 #include <kunit/try-catch.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -223,12 +224,8 @@ struct kunit {
 	 * protect it with some type of lock.
 	 */
 	struct list_head resources; /* Protected by lock. */
+	struct list_head post_conditions;
 };
-
-static inline void kunit_set_failure(struct kunit *test)
-{
-	WRITE_ONCE(test->success, false);
-}
 
 void kunit_init_test(struct kunit *test, const char *name, char *log);
 
@@ -732,6 +729,8 @@ void kunit_do_assertion(struct kunit *test,
  * correctly and the printed out value usually makes sense without
  * interpretation, but can always be interpreted to figure out the actual
  * value.
+ *
+ * TO DO: remove casting (long long) at __left, __right
  */
 #define KUNIT_BASE_BINARY_ASSERTION(test,				       \
 				    assert_class,			       \
@@ -754,9 +753,9 @@ do {									       \
 					  assert_type,			       \
 					  #op,				       \
 					  #left,			       \
-					  __left,			       \
+					  (long long) __left,		       \
 					  #right,			       \
-					  __right),			       \
+					  (long long) __right),		       \
 			fmt,						       \
 			##__VA_ARGS__);					       \
 } while (0)
@@ -880,7 +879,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_EQ_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_EQ_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -919,7 +918,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_NE_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_NE_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -958,7 +957,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_LT_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_LT_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -997,7 +996,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_LE_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_LE_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -1036,7 +1035,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_GT_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_GT_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -1075,7 +1074,7 @@ do {									       \
 					  right,			       \
 					  fmt,				       \
 					  ...)				       \
-	KUNIT_BASE_GE_MSG_ASSERTION(test,				       \
+	KUNIT_BASE_PTR_GE_MSG_ASSERTION(test,				       \
 				    kunit_binary_ptr_assert,		       \
 				    KUNIT_INIT_BINARY_PTR_ASSERT_STRUCT,       \
 				    assert_type,			       \
@@ -1742,4 +1741,8 @@ do {									       \
 						fmt,			       \
 						##__VA_ARGS__)
 
+/*
+ * separate wrapper macro and functions to support 4.19 Kunit
+ */
+#include <kunit/test_wrapper.h>
 #endif /* _KUNIT_TEST_H */

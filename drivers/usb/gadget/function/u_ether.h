@@ -16,7 +16,7 @@
 #include <linux/usb/cdc.h>
 #include <linux/netdevice.h>
 
-#define QMULT_DEFAULT 5
+#define QMULT_DEFAULT 10
 
 /*
  * dev_addr: initial value
@@ -69,6 +69,9 @@ struct gether {
 	bool				is_fixed;
 	u32				fixed_out_len;
 	u32				fixed_in_len;
+	u32				ul_max_pkts_per_xfer;
+	u32				dl_max_pkts_per_xfer;
+	bool				multi_pkt_xfer;
 	bool				supports_multi_frame;
 	struct sk_buff			*(*wrap)(struct gether *port,
 						struct sk_buff *skb);
@@ -243,6 +246,18 @@ unsigned gether_get_qmult(struct net_device *net);
  * Returns zero on success, else negative errno.
  */
 int gether_get_ifname(struct net_device *net, char *name, int len);
+
+/**
+ * gether_set_ifname - set an ethernet-over-usb link interface name
+ * @net: device representing this link
+ * @name: new interface name
+ * @len: length of @name
+ *
+ * This sets the interface name of this ethernet-over-usb link.
+ * A single terminating newline, if any, is ignored.
+ * Returns zero on success, else negative errno.
+ */
+int gether_set_ifname(struct net_device *net, const char *name, int len);
 
 void gether_cleanup(struct eth_dev *dev);
 

@@ -19,6 +19,7 @@
 #include "block.h"
 #include "core.h"
 #include "card.h"
+#include "crypto.h"
 #include "host.h"
 
 #define MMC_DMA_MAP_MERGE_SEGMENTS	512
@@ -407,6 +408,8 @@ static void mmc_setup_queue(struct mmc_queue *mq, struct mmc_card *card)
 	mutex_init(&mq->complete_lock);
 
 	init_waitqueue_head(&mq->wait);
+
+	mmc_crypto_setup_queue(mq->queue, host);
 }
 
 static inline bool mmc_merge_capable(struct mmc_host *host)
@@ -477,7 +480,7 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card)
 		blk_queue_flag_set(QUEUE_FLAG_STABLE_WRITES, mq->queue);
 
 	mq->queue->queuedata = mq;
-	blk_queue_rq_timeout(mq->queue, 60 * HZ);
+	blk_queue_rq_timeout(mq->queue, 20 * HZ);
 
 	mmc_setup_queue(mq, card);
 	return 0;

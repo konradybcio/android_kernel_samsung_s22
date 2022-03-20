@@ -47,10 +47,13 @@
 
 #include <linux/uaccess.h>
 
+#include <trace/hooks/mmc_core.h>
+
 #include "queue.h"
 #include "block.h"
 #include "core.h"
 #include "card.h"
+#include "crypto.h"
 #include "host.h"
 #include "bus.h"
 #include "mmc_ops.h"
@@ -69,7 +72,7 @@ MODULE_ALIAS("mmc:block");
  * second software timer to timeout the whole request, so 10 seconds should be
  * ample.
  */
-#define MMC_BLK_TIMEOUT_MS  (10 * 1000)
+#define MMC_BLK_TIMEOUT_MS  (20 * 1000)
 #define MMC_EXTRACT_INDEX_FROM_ARG(x) ((x & 0x00FF0000) >> 16)
 #define MMC_EXTRACT_VALUE_FROM_ARG(x) ((x & 0x0000FF00) >> 8)
 
@@ -962,6 +965,11 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
 		struct mmc_blk_data *main_md =
 			dev_get_drvdata(&host->card->dev);
 		int part_err;
+		bool allow = true;
+
+		trace_android_vh_mmc_blk_reset(host, err, &allow);
+		if (!allow)
+			return -ENODEV;
 
 		main_md->part_curr = main_md->part_type;
 		part_err = mmc_blk_part_switch(host->card, md->part_type);
@@ -1258,6 +1266,8 @@ static void mmc_blk_data_prep(struct mmc_queue *mq, struct mmc_queue_req *mqrq,
 		    (md->flags & MMC_BLK_REL_WR);
 
 	memset(brq, 0, sizeof(struct mmc_blk_request));
+
+	mmc_crypto_prepare_req(mqrq);
 
 	brq->mrq.data = &brq->data;
 	brq->mrq.tag = req->tag;
@@ -1792,6 +1802,7 @@ static void mmc_blk_mq_rw_recovery(struct mmc_queue *mq, struct request *req)
 	    err && mmc_blk_reset(md, card->host, type)) {
 		pr_err("%s: recovery failed!\n", req->rq_disk->disk_name);
 		mqrq->retries = MMC_NO_RETRIES;
+		trace_android_vh_mmc_blk_mq_rw_recovery(card);
 		return;
 	}
 
@@ -1818,7 +1829,7 @@ static void mmc_blk_mq_rw_recovery(struct mmc_queue *mq, struct request *req)
 
 	/* FIXME: Missing single sector read for large sector size */
 	if (!mmc_large_sector(card) && rq_data_dir(req) == READ &&
-	    brq->data.blocks > 1) {
+	    brq->data.blocks > 1 && !mmc_card_sd(card)) {
 		/* Read one sector at a time */
 		mmc_blk_read_single(mq, req);
 		return;
@@ -2366,7 +2377,8 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 		if ((mmc_card_mmc(card) &&
 		     card->csd.mmca_vsn >= CSD_SPEC_VER_3) ||
 		    (mmc_card_sd(card) &&
-		     card->scr.cmds & SD_SCR_CMD23_SUPPORT))
+		     card->scr.cmds & SD_SCR_CMD23_SUPPORT &&
+			mmc_card_uhs(card)))
 			md->flags |= MMC_BLK_CMD23;
 	}
 
@@ -2913,6 +2925,10 @@ static int mmc_blk_probe(struct mmc_card *card)
 	string_get_size((u64)get_capacity(md->disk), 512, STRING_UNITS_2,
 			cap_str, sizeof(cap_str));
 	pr_info("%s: %s %s %s %s\n",
+		md->disk->disk_name, mmc_card_id(card), mmc_card_name(card),
+		cap_str, md->read_only ? "(ro)" : "");
+
+	ST_LOG("%s: %s %s %s %s\n",
 		md->disk->disk_name, mmc_card_id(card), mmc_card_name(card),
 		cap_str, md->read_only ? "(ro)" : "");
 

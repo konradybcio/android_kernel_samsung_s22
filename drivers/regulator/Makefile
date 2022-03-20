@@ -24,6 +24,7 @@ obj-$(CONFIG_REGULATOR_AD5398) += ad5398.o
 obj-$(CONFIG_REGULATOR_ANATOP) += anatop-regulator.o
 obj-$(CONFIG_REGULATOR_ARIZONA_LDO1) += arizona-ldo1.o
 obj-$(CONFIG_REGULATOR_ARIZONA_MICSUPP) += arizona-micsupp.o
+obj-$(CONFIG_REGULATOR_ARM_SCMI) += scmi-regulator.o
 obj-$(CONFIG_REGULATOR_AS3711) += as3711-regulator.o
 obj-$(CONFIG_REGULATOR_AS3722) += as3722-regulator.o
 obj-$(CONFIG_REGULATOR_AXP20X) += axp20x-regulator.o
@@ -157,5 +158,20 @@ obj-$(CONFIG_REGULATOR_WM831X) += wm831x-ldo.o
 obj-$(CONFIG_REGULATOR_WM8350) += wm8350-regulator.o
 obj-$(CONFIG_REGULATOR_WM8400) += wm8400-regulator.o
 obj-$(CONFIG_REGULATOR_WM8994) += wm8994-regulator.o
+obj-$(CONFIG_REGULATOR_S2MPU13) += s2mpu13_regulator.o
+obj-$(CONFIG_REGULATOR_S2MPU14) += s2mpu14_regulator.o
+
+obj-$(CONFIG_REGULATOR_S2MPS23)		+= s2mps23-regulator.o
+s2mps23-regulator-$(CONFIG_REGULATOR_S2MPS23)	+= s2mps23_regulator.o s2mps23_powermeter.o
+
+obj-$(CONFIG_REGULATOR_S2MPS24)		+= s2mps24-regulator.o
+s2mps24-regulator-$(CONFIG_REGULATOR_S2MPS24)	+= s2mps24_regulator.o s2mps24_powermeter.o
+obj-$(CONFIG_REGULATOR_S2MPS25)		+= s2mps25-regulator.o
+s2mps25-regulator-$(CONFIG_REGULATOR_S2MPS25)	+= s2mps25_regulator.o s2mps25_powermeter.o
+obj-$(CONFIG_REGULATOR_S2MPS26)		+= s2mps26-regulator.o
+s2mps26-regulator-$(CONFIG_REGULATOR_S2MPS26)	+= s2mps26_regulator.o s2mps26_powermeter.o
+obj-$(CONFIG_REGULATOR_S2MPB02) += s2mpb02-regulator.o
+obj-$(CONFIG_REGULATOR_S2MPB03) += s2mpb03.o
+obj-$(CONFIG_REGULATOR_S2MPM07) += s2mpm07_regulator.o
 
 ccflags-$(CONFIG_REGULATOR_DEBUG) += -DDEBUG

@@ -278,6 +278,10 @@ static int fscrypt_new_context(union fscrypt_context *ctx_u,
 		       policy->master_key_descriptor,
 		       sizeof(ctx->master_key_descriptor));
 		memcpy(ctx->nonce, nonce, FSCRYPT_FILE_NONCE_SIZE);
+
+#if defined(CONFIG_FSCRYPT_SDP) || defined(CONFIG_DDAR)
+		ctx->knox_flags = 0;
+#endif
 		return sizeof(*ctx);
 	}
 	case FSCRYPT_POLICY_V2: {
@@ -294,6 +298,10 @@ static int fscrypt_new_context(union fscrypt_context *ctx_u,
 		       policy->master_key_identifier,
 		       sizeof(ctx->master_key_identifier));
 		memcpy(ctx->nonce, nonce, FSCRYPT_FILE_NONCE_SIZE);
+
+#if defined(CONFIG_FSCRYPT_SDP) || defined(CONFIG_DDAR)
+		ctx->knox_flags = 0;
+#endif
 		return sizeof(*ctx);
 	}
 	}
@@ -590,7 +598,7 @@ EXPORT_SYMBOL_GPL(fscrypt_ioctl_get_nonce);
 int fscrypt_has_permitted_context(struct inode *parent, struct inode *child)
 {
 	union fscrypt_policy parent_policy, child_policy;
-	int err;
+	int err, err1, err2;
 
 	/* No restrictions on file types which are never encrypted */
 	if (!S_ISREG(child->i_mode) && !S_ISDIR(child->i_mode) &&
@@ -620,19 +628,25 @@ int fscrypt_has_permitted_context(struct inode *parent, struct inode *child)
 	 * In any case, if an unexpected error occurs, fall back to "forbidden".
 	 */
 
-	err = fscrypt_get_encryption_info(parent);
+	err = fscrypt_get_encryption_info(parent, true);
 	if (err)
 		return 0;
-	err = fscrypt_get_encryption_info(child);
-	if (err)
-		return 0;
-
-	err = fscrypt_get_policy(parent, &parent_policy);
+	err = fscrypt_get_encryption_info(child, true);
 	if (err)
 		return 0;
 
-	err = fscrypt_get_policy(child, &child_policy);
-	if (err)
+	err1 = fscrypt_get_policy(parent, &parent_policy);
+	err2 = fscrypt_get_policy(child, &child_policy);
+
+	/*
+	 * Allow the case where the parent and child both have an unrecognized
+	 * encryption policy, so that files with an unrecognized encryption
+	 * policy can be deleted.
+	 */
+	if (err1 == -EINVAL && err2 == -EINVAL)
+		return 1;
+
+	if (err1 || err2)
 		return 0;
 
 	return fscrypt_policies_equal(&parent_policy, &child_policy);
@@ -693,6 +707,60 @@ int fscrypt_set_context(struct inode *inode, void *fs_data)
 		fscrypt_hash_inode_number(ci, mk);
 	}
 
+#if defined(CONFIG_FSCRYPT_SDP) || defined(CONFIG_DDAR)
+	if (fscrypt_has_dar_info(inode)) {
+		int res = 0;
+#ifdef CONFIG_DDAR
+		if (ci->ci_dd_info) {
+			res = fscrypt_set_knox_ddar_flags(&ctx, ci);
+			if (res) {
+				dd_error("failed to set knox ddar flag\n");
+				return res;
+			}
+
+			res = inode->i_sb->s_cop->set_context(inode, &ctx, ctxsize, fs_data);
+			if (res) {
+				dd_error("failed to set context (%ld)\n", inode->i_ino);
+				return res;
+			}
+
+			res = dd_write_crypt_context(inode, &ci->ci_dd_info->crypt_context, fs_data);
+			dd_verbose("%s - ino : %ld, policy.flag:%x, res : %d", __func__, inode->i_ino, ci->ci_dd_info->policy.flags, res);
+		}
+#endif
+#ifdef CONFIG_FSCRYPT_SDP
+		if (ci->ci_sdp_info) {
+			struct fscrypt_sdp_context sdp_ctx;
+			res = fscrypt_set_knox_sdp_flags(&ctx, ci);
+			if (res) {
+				printk_once(KERN_WARNING
+						"%s: Failed to set sensitive ongoing flag (err:%d)\n", __func__, res);
+				return res;
+			}
+
+			res = inode->i_sb->s_cop->set_context(inode, &ctx, ctxsize, fs_data);
+			if (res) {
+				printk("failed to set context (%ld)\n", inode->i_ino);
+				return res;
+			}
+
+			sdp_ctx.engine_id = ci->ci_sdp_info->engine_id;
+			sdp_ctx.sdp_dek_type = ci->ci_sdp_info->sdp_dek.type;
+			sdp_ctx.sdp_dek_len = ci->ci_sdp_info->sdp_dek.len;
+			memcpy(sdp_ctx.sdp_dek_buf, ci->ci_sdp_info->sdp_dek.buf, DEK_MAXLEN); //Full copy without memset
+	//		memset(sdp_ctx.sdp_en_buf, 0, MAX_EN_BUF_LEN); // Keep it as dummy
+			memcpy(sdp_ctx.sdp_en_buf, ci->ci_sdp_info->sdp_en_buf, MAX_EN_BUF_LEN);
+
+			/* Update SDP Context */
+			res = fscrypt_sdp_set_context_nolock(inode, &sdp_ctx, sizeof(sdp_ctx), fs_data);
+			if (res) {
+				printk("fscrypt_set_context: failed to set sdp context (err:%d)\n", res);
+			}
+		}
+#endif
+		return res;
+	}
+#endif
 	return inode->i_sb->s_cop->set_context(inode, &ctx, ctxsize, fs_data);
 }
 EXPORT_SYMBOL_GPL(fscrypt_set_context);

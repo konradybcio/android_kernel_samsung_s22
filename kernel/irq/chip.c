@@ -14,6 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/irqdomain.h>
+#include <linux/wakeup_reason.h>
 
 #include <trace/events/irq.h>
 
@@ -417,8 +418,10 @@ static inline void mask_ack_irq(struct irq_desc *desc)
 
 void mask_irq(struct irq_desc *desc)
 {
+#if 0
 	if (irqd_irq_masked(&desc->irq_data))
 		return;
+#endif
 
 	if (desc->irq_data.chip->irq_mask) {
 		desc->irq_data.chip->irq_mask(&desc->irq_data);
@@ -428,8 +431,10 @@ void mask_irq(struct irq_desc *desc)
 
 void unmask_irq(struct irq_desc *desc)
 {
+#if 0
 	if (!irqd_irq_masked(&desc->irq_data))
 		return;
+#endif
 
 	if (desc->irq_data.chip->irq_unmask) {
 		desc->irq_data.chip->irq_unmask(&desc->irq_data);
@@ -507,8 +512,22 @@ static bool irq_may_run(struct irq_desc *desc)
 	 * If the interrupt is not in progress and is not an armed
 	 * wakeup interrupt, proceed.
 	 */
-	if (!irqd_has_set(&desc->irq_data, mask))
+	if (!irqd_has_set(&desc->irq_data, mask)) {
+#ifdef CONFIG_PM_SLEEP
+		if (unlikely(desc->no_suspend_depth &&
+			     irqd_is_wakeup_set(&desc->irq_data))) {
+			unsigned int irq = irq_desc_get_irq(desc);
+			const char *name = "(unnamed)";
+
+			if (desc->action && desc->action->name)
+				name = desc->action->name;
+
+			log_abnormal_wakeup_reason("misconfigured IRQ %u %s",
+						   irq, name);
+		}
+#endif
 		return true;
+	}
 
 	/*
 	 * If the interrupt is an armed wakeup source, mark it pending
@@ -1107,7 +1126,8 @@ irq_set_chip_and_handler_name(unsigned int irq, struct irq_chip *chip,
 }
 EXPORT_SYMBOL_GPL(irq_set_chip_and_handler_name);
 
-void irq_modify_status(unsigned int irq, unsigned long clr, unsigned long set)
+void __irq_modify_status(unsigned int irq, unsigned long clr,
+			 unsigned long set, unsigned long mask)
 {
 	unsigned long flags, trigger, tmp;
 	struct irq_desc *desc = irq_get_desc_lock(irq, &flags, 0);
@@ -1121,7 +1141,9 @@ void irq_modify_status(unsigned int irq, unsigned long clr, unsigned long set)
 	 */
 	WARN_ON_ONCE(!desc->depth && (set & _IRQ_NOAUTOEN));
 
-	irq_settings_clr_and_set(desc, clr, set);
+	/* Warn when trying to clear or set a bit disallowed by the mask */
+	WARN_ON((clr | set) & ~mask);
+	__irq_settings_clr_and_set(desc, clr, set, mask);
 
 	trigger = irqd_get_trigger_type(&desc->irq_data);
 
@@ -1143,6 +1165,11 @@ void irq_modify_status(unsigned int irq, unsigned long clr, unsigned long set)
 	irqd_set(&desc->irq_data, trigger);
 
 	irq_put_desc_unlock(desc, flags);
+}
+
+void irq_modify_status(unsigned int irq, unsigned long clr, unsigned long set)
+{
+	__irq_modify_status(irq, clr, set, _IRQF_MODIFY_MASK);
 }
 EXPORT_SYMBOL_GPL(irq_modify_status);
 

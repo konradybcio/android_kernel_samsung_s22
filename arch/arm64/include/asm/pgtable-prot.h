@@ -71,10 +71,10 @@ extern bool arm64_use_ng_mappings;
 #define PAGE_KERNEL_EXEC	__pgprot(PROT_NORMAL & ~PTE_PXN)
 #define PAGE_KERNEL_EXEC_CONT	__pgprot((PROT_NORMAL & ~PTE_PXN) | PTE_CONT)
 
-#define PAGE_S2_MEMATTR(attr)						\
+#define PAGE_S2_MEMATTR(attr, has_fwb)					\
 	({								\
 		u64 __val;						\
-		if (cpus_have_const_cap(ARM64_HAS_STAGE2_FWB))		\
+		if (has_fwb)						\
 			__val = PTE_S2_MEMATTR(MT_S2_FWB_ ## attr);	\
 		else							\
 			__val = PTE_S2_MEMATTR(MT_S2_ ## attr);		\
@@ -87,6 +87,13 @@ extern bool arm64_use_ng_mappings;
 #define PAGE_SHARED_EXEC	__pgprot(_PAGE_DEFAULT | PTE_USER | PTE_RDONLY | PTE_NG | PTE_PXN | PTE_WRITE)
 #define PAGE_READONLY		__pgprot(_PAGE_DEFAULT | PTE_USER | PTE_RDONLY | PTE_NG | PTE_PXN | PTE_UXN)
 #define PAGE_READONLY_EXEC	__pgprot(_PAGE_DEFAULT | PTE_USER | PTE_RDONLY | PTE_NG | PTE_PXN)
+
+#ifdef CONFIG_RKP
+#define PTE_RKP_RO          (_AT(pteval_t, 1) << 57)
+#define PAGE_KERNEL_RKP_RO  __pgprot(PROT_NORMAL | PTE_RKP_RO)
+#define pgprot_rkp_ro(prot) (!!(pgprot_val(prot) & (PTE_RKP_RO)))
+#define addr_rkp_ro(addr)   (!(addr & (PTE_RKP_RO)))
+#endif
 
 #define __P000  PAGE_NONE
 #define __P001  PAGE_READONLY

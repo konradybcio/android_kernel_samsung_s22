@@ -1967,8 +1967,6 @@ static int unuse_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 	si = swap_info[type];
 	pte = pte_offset_map(pmd, addr);
 	do {
-		struct vm_fault vmf;
-
 		if (!is_swap_pte(*pte))
 			continue;
 
@@ -1984,9 +1982,12 @@ static int unuse_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 		swap_map = &si->swap_map[offset];
 		page = lookup_swap_cache(entry, vma, addr);
 		if (!page) {
-			vmf.vma = vma;
-			vmf.address = addr;
-			vmf.pmd = pmd;
+			struct vm_fault vmf = {
+				.vma = vma,
+				.address = addr,
+				.pmd = pmd,
+			};
+
 			page = swapin_readahead(entry, GFP_HIGHUSER_MOVABLE,
 						&vmf);
 		}
@@ -3161,6 +3162,10 @@ static bool swap_discardable(struct swap_info_struct *si)
 	return true;
 }
 
+#if IS_ENABLED(CONFIG_ZRAM)
+zram_oem_func zram_oem_fn;
+#endif
+
 SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 {
 	struct swap_info_struct *p;
@@ -3421,6 +3426,15 @@ out:
 		inode_unlock(inode);
 	if (!error)
 		enable_swap_slots_cache();
+#if IS_ENABLED(CONFIG_ZRAM)
+	if (!error && !zram_oem_fn) {
+		const struct block_device_operations *ops;
+
+		ops = p->bdev->bd_disk->fops;
+		if (ops->android_oem_data1)
+			zram_oem_fn = (zram_oem_func)ops->android_oem_data1;
+	}
+#endif
 	return error;
 }
 
@@ -3440,6 +3454,7 @@ void si_swapinfo(struct sysinfo *val)
 	val->totalswap = total_swap_pages + nr_to_be_unused;
 	spin_unlock(&swap_lock);
 }
+EXPORT_SYMBOL_GPL(si_swapinfo);
 
 /*
  * Verify that a swap entry is valid and increment its swap map count.
@@ -3811,7 +3826,7 @@ static void free_swap_count_continuations(struct swap_info_struct *si)
 }
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_BLK_CGROUP)
-void cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
+void __cgroup_throttle_swaprate(struct page *page, gfp_t gfp_mask)
 {
 	struct swap_info_struct *si, *next;
 	int nid = page_to_nid(page);

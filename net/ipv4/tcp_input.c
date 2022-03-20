@@ -80,6 +80,7 @@
 #include <linux/jump_label_ratelimit.h>
 #include <net/busy_poll.h>
 #include <net/mptcp.h>
+#include <trace/hooks/net.h>
 
 int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
 
@@ -4618,6 +4619,7 @@ static bool tcp_ooo_try_coalesce(struct sock *sk,
 
 static void tcp_drop(struct sock *sk, struct sk_buff *skb)
 {
+	trace_android_vh_kfree_skb(skb);
 	sk_drops_add(sk, skb);
 	__kfree_skb(skb);
 }
@@ -4836,6 +4838,11 @@ end:
 	}
 }
 
+#if IS_ENABLED(CONFIG_CPIF_LATENCY_MEASURE)
+int (*tcp_queue_rcv_cb)(char *);
+EXPORT_SYMBOL_GPL(tcp_queue_rcv_cb);
+#endif
+
 static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb,
 				      bool *fragstolen)
 {
@@ -4850,6 +4857,10 @@ static int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb,
 		__skb_queue_tail(&sk->sk_receive_queue, skb);
 		skb_set_owner_r(skb, sk);
 	}
+#if IS_ENABLED(CONFIG_CPIF_LATENCY_MEASURE)
+	if (tcp_queue_rcv_cb)
+		tcp_queue_rcv_cb(skb->head);
+#endif
 	return eaten;
 }
 

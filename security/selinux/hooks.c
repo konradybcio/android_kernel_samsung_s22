@@ -214,7 +214,14 @@ static void cred_init_security(void)
 	struct cred *cred = (struct cred *) current->real_cred;
 	struct task_security_struct *tsec;
 
+#ifdef CONFIG_KDP_CRED
+	tsec = &init_sec;
+	tsec->bp_cred = cred;
+	// is not support 5.4 upper version, so we added
+	cred->security = tsec;
+#else
 	tsec = selinux_cred(cred);
+#endif
 	tsec->osid = tsec->sid = SECINITSID_KERNEL;
 }
 
@@ -504,7 +511,8 @@ static int sb_finish_set_opts(struct super_block *sb)
 			goto out;
 		}
 
-		rc = __vfs_getxattr(root, root_inode, XATTR_NAME_SELINUX, NULL, 0);
+		rc = __vfs_getxattr(root, root_inode, XATTR_NAME_SELINUX, NULL,
+				    0, XATTR_NOSECURITY);
 		if (rc < 0 && rc != -ENODATA) {
 			if (rc == -EOPNOTSUPP)
 				pr_warn("SELinux: (dev %s, type "
@@ -702,6 +710,9 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 
 	if (!strcmp(sb->s_type->name, "debugfs") ||
 	    !strcmp(sb->s_type->name, "tracefs") ||
+// [ SEC_SELINUX_PORTING_COMMON
+		!strcmp(sb->s_type->name, "configfs") ||
+// ] SEC_SELINUX_PORTING_COMMON			
 	    !strcmp(sb->s_type->name, "binder") ||
 	    !strcmp(sb->s_type->name, "bpf") ||
 	    !strcmp(sb->s_type->name, "pstore"))
@@ -1332,12 +1343,14 @@ static int inode_doinit_use_xattr(struct inode *inode, struct dentry *dentry,
 		return -ENOMEM;
 
 	context[len] = '\0';
-	rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, context, len);
+	rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, context, len,
+			    XATTR_NOSECURITY);
 	if (rc == -ERANGE) {
 		kfree(context);
 
 		/* Need a larger buffer.  Query for the right size. */
-		rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, NULL, 0);
+		rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX, NULL, 0,
+				    XATTR_NOSECURITY);
 		if (rc < 0)
 			return rc;
 
@@ -1348,7 +1361,7 @@ static int inode_doinit_use_xattr(struct inode *inode, struct dentry *dentry,
 
 		context[len] = '\0';
 		rc = __vfs_getxattr(dentry, inode, XATTR_NAME_SELINUX,
-				    context, len);
+				    context, len, XATTR_NOSECURITY);
 	}
 	if (rc < 0) {
 		kfree(context);
@@ -2933,6 +2946,62 @@ static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
 	}
 
 	return 0;
+}
+
+static int selinux_inode_init_security_anon(struct inode *inode,
+					    const struct qstr *name,
+					    const struct inode *context_inode)
+{
+	const struct task_security_struct *tsec = selinux_cred(current_cred());
+	struct common_audit_data ad;
+	struct inode_security_struct *isec;
+	int rc;
+
+	if (unlikely(!selinux_initialized(&selinux_state)))
+		return 0;
+
+	isec = selinux_inode(inode);
+
+	/*
+	 * We only get here once per ephemeral inode.  The inode has
+	 * been initialized via inode_alloc_security but is otherwise
+	 * untouched.
+	 */
+
+	if (context_inode) {
+		struct inode_security_struct *context_isec =
+			selinux_inode(context_inode);
+		if (context_isec->initialized != LABEL_INITIALIZED) {
+			pr_err("SELinux:  context_inode is not initialized");
+			return -EACCES;
+		}
+
+		isec->sclass = context_isec->sclass;
+		isec->sid = context_isec->sid;
+	} else {
+		isec->sclass = SECCLASS_ANON_INODE;
+		rc = security_transition_sid(
+			&selinux_state, tsec->sid, tsec->sid,
+			isec->sclass, name, &isec->sid);
+		if (rc)
+			return rc;
+	}
+
+	isec->initialized = LABEL_INITIALIZED;
+	/*
+	 * Now that we've initialized security, check whether we're
+	 * allowed to actually create this type of anonymous inode.
+	 */
+
+	ad.type = LSM_AUDIT_DATA_INODE;
+	ad.u.inode = inode;
+
+	return avc_has_perm(&selinux_state,
+			    tsec->sid,
+			    isec->sid,
+			    isec->sclass,
+			    FILE__CREATE,
+			    &ad);
 }
 
 static int selinux_inode_create(struct inode *dir, struct dentry *dentry, umode_t mode)
@@ -6852,34 +6921,6 @@ static void selinux_bpf_prog_free(struct bpf_prog_aux *aux)
 }
 #endif
 
-static int selinux_lockdown(enum lockdown_reason what)
-{
-	struct common_audit_data ad;
-	u32 sid = current_sid();
-	int invalid_reason = (what <= LOCKDOWN_NONE) ||
-			     (what == LOCKDOWN_INTEGRITY_MAX) ||
-			     (what >= LOCKDOWN_CONFIDENTIALITY_MAX);
-
-	if (WARN(invalid_reason, "Invalid lockdown reason")) {
-		audit_log(audit_context(),
-			  GFP_ATOMIC, AUDIT_SELINUX_ERR,
-			  "lockdown_reason=invalid");
-		return -EINVAL;
-	}
-
-	ad.type = LSM_AUDIT_DATA_LOCKDOWN;
-	ad.u.reason = what;
-
-	if (what <= LOCKDOWN_INTEGRITY_MAX)
-		return avc_has_perm(&selinux_state,
-				    sid, sid, SECCLASS_LOCKDOWN,
-				    LOCKDOWN__INTEGRITY, &ad);
-	else
-		return avc_has_perm(&selinux_state,
-				    sid, sid, SECCLASS_LOCKDOWN,
-				    LOCKDOWN__CONFIDENTIALITY, &ad);
-}
-
 struct lsm_blob_sizes selinux_blob_sizes __lsm_ro_after_init = {
 	.lbs_cred = sizeof(struct task_security_struct),
 	.lbs_file = sizeof(struct file_security_struct),
@@ -6964,7 +7005,11 @@ static int selinux_perf_event_write(struct perf_event *event)
  * safely. Breaking the ordering rules above might lead to NULL pointer derefs
  * when disabling SELinux at runtime.
  */
+#ifdef CONFIG_KDP_CRED
+static struct security_hook_list selinux_hooks[] __lsm_ro_after_init_kdp = {
+#else
 static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
+#endif
 	LSM_HOOK_INIT(binder_set_context_mgr, selinux_binder_set_context_mgr),
 	LSM_HOOK_INIT(binder_transaction, selinux_binder_transaction),
 	LSM_HOOK_INIT(binder_transfer_binder, selinux_binder_transfer_binder),
@@ -7004,6 +7049,7 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
 
 	LSM_HOOK_INIT(inode_free_security, selinux_inode_free_security),
 	LSM_HOOK_INIT(inode_init_security, selinux_inode_init_security),
+	LSM_HOOK_INIT(inode_init_security_anon, selinux_inode_init_security_anon),
 	LSM_HOOK_INIT(inode_create, selinux_inode_create),
 	LSM_HOOK_INIT(inode_link, selinux_inode_link),
 	LSM_HOOK_INIT(inode_unlink, selinux_inode_unlink),
@@ -7184,8 +7230,6 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(perf_event_read, selinux_perf_event_read),
 	LSM_HOOK_INIT(perf_event_write, selinux_perf_event_write),
 #endif
-
-	LSM_HOOK_INIT(locked_down, selinux_lockdown),
 
 	/*
 	 * PUT "CLONING" (ACCESSING + ALLOCATING) HOOKS HERE

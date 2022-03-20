@@ -15,6 +15,7 @@
 #include <linux/bitops.h>
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
+#include <linux/sched/debug.h>
 
 struct pagevec;
 
@@ -30,6 +31,9 @@ enum mapping_flags {
 	/* writeback related tags are not used */
 	AS_NO_WRITEBACK_TAGS = 5,
 	AS_THP_SUPPORT = 6,	/* THPs supported */
+#if defined(CONFIG_SDP)
+	AS_SENSITIVE = __GFP_BITS_SHIFT + 5, /* Group of sensitive pages to be cleaned up */
+#endif
 };
 
 /**
@@ -154,6 +158,25 @@ static inline void filemap_nr_thps_dec(struct address_space *mapping)
 	WARN_ON_ONCE(1);
 #endif
 }
+
+#if defined(CONFIG_SDP)
+static inline void mapping_set_sensitive(struct address_space *mapping)
+{
+	set_bit(AS_SENSITIVE, &mapping->flags);
+}
+
+static inline void mapping_clear_sensitive(struct address_space *mapping)
+{
+	clear_bit(AS_SENSITIVE, &mapping->flags);
+}
+
+static inline int mapping_sensitive(struct address_space *mapping)
+{
+	if (mapping)
+		return test_bit(AS_SENSITIVE, &mapping->flags);
+	return !!mapping;
+}
+#endif
 
 void release_pages(struct page **pages, int nr);
 
@@ -295,10 +318,7 @@ static inline struct page *page_cache_alloc(struct address_space *x)
 	return __page_cache_alloc(mapping_gfp_mask(x));
 }
 
-static inline gfp_t readahead_gfp_mask(struct address_space *x)
-{
-	return mapping_gfp_mask(x) | __GFP_NORETRY | __GFP_NOWARN;
-}
+gfp_t readahead_gfp_mask(struct address_space *x);
 
 typedef int filler_t(void *, struct page *);
 
@@ -554,8 +574,8 @@ static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
 	pgoff_t pgoff;
 	if (unlikely(is_vm_hugetlb_page(vma)))
 		return linear_hugepage_index(vma, address);
-	pgoff = (address - vma->vm_start) >> PAGE_SHIFT;
-	pgoff += vma->vm_pgoff;
+	pgoff = (address - READ_ONCE(vma->vm_start)) >> PAGE_SHIFT;
+	pgoff += READ_ONCE(vma->vm_pgoff);
 	return pgoff;
 }
 
@@ -603,7 +623,7 @@ static inline int trylock_page(struct page *page)
 /*
  * lock_page may only be called if we have the page's inode pinned.
  */
-static inline void lock_page(struct page *page)
+static inline __sched void lock_page(struct page *page)
 {
 	might_sleep();
 	if (!trylock_page(page))
@@ -615,7 +635,7 @@ static inline void lock_page(struct page *page)
  * signals.  It returns 0 if it locked the page and -EINTR if it was
  * killed while waiting.
  */
-static inline int lock_page_killable(struct page *page)
+static inline __sched int lock_page_killable(struct page *page)
 {
 	might_sleep();
 	if (!trylock_page(page))
@@ -631,7 +651,7 @@ static inline int lock_page_killable(struct page *page)
  * Returns 0 if the page is locked successfully, or -EIOCBQUEUED if the page
  * was already locked and the callback defined in 'wait' was queued.
  */
-static inline int lock_page_async(struct page *page,
+static inline __sched int lock_page_async(struct page *page,
 				  struct wait_page_queue *wait)
 {
 	if (!trylock_page(page))
@@ -646,7 +666,7 @@ static inline int lock_page_async(struct page *page,
  * Return value and mmap_lock implications depend on flags; see
  * __lock_page_or_retry().
  */
-static inline int lock_page_or_retry(struct page *page, struct mm_struct *mm,
+static inline __sched int lock_page_or_retry(struct page *page, struct mm_struct *mm,
 				     unsigned int flags)
 {
 	might_sleep();
@@ -667,13 +687,13 @@ extern int wait_on_page_bit_killable(struct page *page, int bit_nr);
  * ie with increased "page->count" so that the page won't
  * go away during the wait..
  */
-static inline void wait_on_page_locked(struct page *page)
+static inline __sched void wait_on_page_locked(struct page *page)
 {
 	if (PageLocked(page))
 		wait_on_page_bit(compound_head(page), PG_locked);
 }
 
-static inline int wait_on_page_locked_killable(struct page *page)
+static inline __sched int wait_on_page_locked_killable(struct page *page)
 {
 	if (!PageLocked(page))
 		return 0;
@@ -808,6 +828,7 @@ struct readahead_control {
 	}
 
 #define VM_READAHEAD_PAGES	(SZ_128K / PAGE_SIZE)
+extern unsigned int mmap_readaround_limit;
 
 void page_cache_ra_unbounded(struct readahead_control *,
 		unsigned long nr_to_read, unsigned long lookahead_count);

@@ -50,8 +50,13 @@
 #include <linux/uaccess.h>
 #include <linux/sched/isolation.h>
 #include <linux/nmi.h>
-
+#include <linux/sec_debug.h>
 #include "workqueue_internal.h"
+
+#include <trace/hooks/wqlockup.h>
+#include <trace/hooks/workqueue.h>
+/* events/workqueue.h uses default TRACE_INCLUDE_PATH */
+#undef TRACE_INCLUDE_PATH
 
 enum {
 	/*
@@ -279,6 +284,21 @@ struct workqueue_struct {
 	struct pool_workqueue __rcu *numa_pwq_tbl[]; /* PWR: unbound pwqs indexed by node */
 };
 
+#if IS_ENABLED(CONFIG_SEC_DEBUG)
+SECDBG_DEFINE_MEMBER_TYPE(workqueue_struct_name, workqueue_struct, name);
+SECDBG_DEFINE_MEMBER_TYPE(workqueue_struct_nr_pwqs_to_flush, workqueue_struct, nr_pwqs_to_flush);
+SECDBG_DEFINE_MEMBER_TYPE(workqueue_struct_flush_color, workqueue_struct, flush_color);
+SECDBG_DEFINE_MEMBER_TYPE(workqueue_struct_pwqs, workqueue_struct, pwqs);
+SECDBG_DEFINE_MEMBER_TYPE(pool_workqueue_pwqs_node, pool_workqueue, pwqs_node);
+SECDBG_DEFINE_MEMBER_TYPE(pool_workqueue_flush_color, pool_workqueue, flush_color);
+SECDBG_DEFINE_MEMBER_TYPE(pool_workqueue_nr_in_flight, pool_workqueue, nr_in_flight);
+SECDBG_DEFINE_MEMBER_TYPE(pool_workqueue_pool, pool_workqueue, pool);
+SECDBG_DEFINE_MEMBER_TYPE(worker_pool_busy_hash, worker_pool, busy_hash);
+SECDBG_DEFINE_MEMBER_TYPE(worker_hentry, worker, hentry);
+SECDBG_DEFINE_MEMBER_TYPE(worker_current_pwq, worker, current_pwq);
+SECDBG_DEFINE_MEMBER_TYPE(worker_task, worker, task);
+#endif
+
 static struct kmem_cache *pwq_cache;
 
 static cpumask_var_t *wq_numa_possible_cpumask;
@@ -360,6 +380,9 @@ static void show_pwq(struct pool_workqueue *pwq);
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/workqueue.h>
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(workqueue_execute_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(workqueue_execute_end);
 
 #define assert_rcu_or_pool_mutex()					\
 	RCU_LOCKDEP_WARN(!rcu_read_lock_held() &&			\
@@ -1327,6 +1350,9 @@ static void insert_work(struct pool_workqueue *pwq, struct work_struct *work,
 {
 	struct worker_pool *pool = pwq->pool;
 
+	/* record the work call stack in order to print it in KASAN reports */
+	kasan_record_aux_stack(work);
+
 	/* we own @work, set data and link */
 	set_work_pwq(work, pwq, extra_flags);
 	list_add_tail(&work->entry, head);
@@ -1627,7 +1653,14 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 	struct work_struct *work = &dwork->work;
 
 	WARN_ON_ONCE(!wq);
-	WARN_ON_ONCE(timer->function != delayed_work_timer_fn);
+	/*
+	 * With CFI, timer->function can point to a jump table entry in a module,
+	 * which fails the comparison. Disable the warning if CFI and modules are
+	 * both enabled.
+	 */
+	if (!IS_ENABLED(CONFIG_CFI_CLANG) || !IS_ENABLED(CONFIG_MODULES))
+		WARN_ON_ONCE(timer->function != delayed_work_timer_fn);
+
 	WARN_ON_ONCE(timer_pending(timer));
 	WARN_ON_ONCE(!list_empty(&work->entry));
 
@@ -1931,6 +1964,7 @@ static struct worker *create_worker(struct worker_pool *pool)
 	if (IS_ERR(worker->task))
 		goto fail;
 
+	trace_android_vh_create_worker(worker, pool->attrs);
 	set_user_nice(worker->task, pool->attrs->nice);
 	kthread_bind_mask(worker->task, pool->attrs->cpumask);
 
@@ -2829,7 +2863,9 @@ void flush_workqueue(struct workqueue_struct *wq)
 
 	mutex_unlock(&wq->mutex);
 
+	secdbg_dtsk_built_set_data(DTYPE_WQFLUSH, wq);
 	wait_for_completion(&this_flusher.done);
+	secdbg_dtsk_built_clear_data();
 
 	/*
 	 * Wake-up-and-cascade phase
@@ -3043,7 +3079,9 @@ static bool __flush_work(struct work_struct *work, bool from_cancel)
 	}
 
 	if (start_flush_work(work, &barr, from_cancel)) {
+		secdbg_dtsk_built_set_data(DTYPE_WORK, work);
 		wait_for_completion(&barr.done);
+		secdbg_dtsk_built_clear_data();
 		destroy_work_on_stack(&barr.work);
 		return true;
 	} else {
@@ -5792,17 +5830,21 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 		/* did we stall? */
 		if (time_after(jiffies, ts + thresh)) {
 			lockup_detected = true;
-			pr_emerg("BUG: workqueue lockup - pool");
+			pr_auto(ASL9, "BUG: workqueue lockup - pool");
 			pr_cont_pool_info(pool);
 			pr_cont(" stuck for %us!\n",
 				jiffies_to_msecs(jiffies - pool_ts) / 1000);
+			trace_android_vh_wq_lockup_pool(pool->cpu, pool_ts);
 		}
 	}
 
 	rcu_read_unlock();
 
-	if (lockup_detected)
+	if (lockup_detected) {
 		show_workqueue_state();
+		if (IS_ENABLED(CONFIG_SEC_DEBUG_WORKQUEUE_LOCKUP_PANIC))
+			BUG();
+	}
 
 	wq_watchdog_reset_touched();
 	mod_timer(&wq_watchdog_timer, jiffies + thresh);

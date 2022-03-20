@@ -96,6 +96,8 @@
 #include <linux/kasan.h>
 #include <linux/scs.h>
 #include <linux/io_uring.h>
+#include <linux/cpufreq_times.h>
+#include <linux/task_integrity.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -108,6 +110,16 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/sched.h>
+
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
+
+#ifdef CONFIG_KDP_CRED
+#include <linux/kdp.h>
+#endif
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -117,6 +129,8 @@
  * Maximum number of threads
  */
 #define MAX_THREADS FUTEX_TID_MASK
+
+EXPORT_TRACEPOINT_SYMBOL_GPL(task_newtask);
 
 /*
  * Protected counters by write_lock_irq(&tasklist_lock)
@@ -138,6 +152,7 @@ static const char * const resident_page_types[] = {
 DEFINE_PER_CPU(unsigned long, process_counts) = 0;
 
 __cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
+EXPORT_SYMBOL_GPL(tasklist_lock);
 
 #ifdef CONFIG_PROVE_RCU
 int lockdep_tasklist_lock_is_held(void)
@@ -225,8 +240,8 @@ static unsigned long *alloc_thread_stack_node(struct task_struct *tsk, int node)
 		if (!s)
 			continue;
 
-		/* Clear the KASAN shadow of the stack. */
-		kasan_unpoison_shadow(s->addr, THREAD_SIZE);
+		/* Mark stack accessible for KASAN. */
+		kasan_unpoison_range(s->addr, THREAD_SIZE);
 
 		/* Clear stale pointers from reused stack. */
 		memset(s->addr, 0, THREAD_SIZE);
@@ -363,7 +378,7 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 		 * will be reinitialized.
 		 */
 		*new = data_race(*orig);
-		INIT_LIST_HEAD(&new->anon_vma_chain);
+		INIT_VMA(new);
 		new->vm_next = new->vm_prev = NULL;
 	}
 	return new;
@@ -437,12 +452,15 @@ void put_task_stack(struct task_struct *tsk)
 	if (refcount_dec_and_test(&tsk->stack_refcount))
 		release_task_stack(tsk);
 }
+EXPORT_SYMBOL_GPL(put_task_stack);
 #endif
 
 void free_task(struct task_struct *tsk)
 {
+	cpufreq_task_times_exit(tsk);
 	scs_release(tsk);
 
+	trace_android_vh_free_task(tsk);
 #ifndef CONFIG_THREAD_INFO_IN_TASK
 	/*
 	 * The task is finally done with both the stack and thread_info,
@@ -469,7 +487,7 @@ EXPORT_SYMBOL(free_task);
 static __latent_entropy int dup_mmap(struct mm_struct *mm,
 					struct mm_struct *oldmm)
 {
-	struct vm_area_struct *mpnt, *tmp, *prev, **pprev;
+	struct vm_area_struct *mpnt, *tmp, *prev, **pprev, *last = NULL;
 	struct rb_node **rb_link, *rb_parent;
 	int retval;
 	unsigned long charge;
@@ -589,8 +607,18 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		rb_parent = &tmp->vm_rb;
 
 		mm->map_count++;
-		if (!(tmp->vm_flags & VM_WIPEONFORK))
+		if (!(tmp->vm_flags & VM_WIPEONFORK)) {
+			if (IS_ENABLED(CONFIG_SPECULATIVE_PAGE_FAULT)) {
+				/*
+				 * Mark this VMA as changing to prevent the
+				 * speculative page fault hanlder to process
+				 * it until the TLB are flushed below.
+				 */
+				last = mpnt;
+				vm_write_begin(mpnt);
+			}
 			retval = copy_page_range(tmp, mpnt);
+		}
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
@@ -603,6 +631,22 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 out:
 	mmap_write_unlock(mm);
 	flush_tlb_mm(oldmm);
+
+	if (IS_ENABLED(CONFIG_SPECULATIVE_PAGE_FAULT)) {
+		/*
+		 * Since the TLB has been flush, we can safely unmark the
+		 * copied VMAs and allows the speculative page fault handler to
+		 * process them again.
+		 * Walk back the VMA list from the last marked VMA.
+		 */
+		for (; last; last = last->vm_prev) {
+			if (last->vm_flags & VM_DONTCOPY)
+				continue;
+			if (!(last->vm_flags & VM_WIPEONFORK))
+				vm_write_end(last);
+		}
+	}
+
 	mmap_write_unlock(oldmm);
 	dup_userfaultfd_complete(&uf);
 fail_uprobe_end:
@@ -943,6 +987,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 #ifdef CONFIG_MEMCG
 	tsk->active_memcg = NULL;
 #endif
+	trace_android_vh_dup_task_struct(tsk, orig);
 	return tsk;
 
 free_stack:
@@ -1012,6 +1057,9 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm->mmap = NULL;
 	mm->mm_rb = RB_ROOT;
 	mm->vmacache_seqnum = 0;
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	rwlock_init(&mm->mm_rb_lock);
+#endif
 	atomic_set(&mm->mm_users, 1);
 	atomic_set(&mm->mm_count, 1);
 	seqcount_init(&mm->write_protect_seq);
@@ -1673,6 +1721,59 @@ init_task_pid(struct task_struct *task, enum pid_type type, struct pid *pid)
 		task->signal->pids[type] = pid;
 }
 
+#ifdef CONFIG_FIVE
+static int dup_task_integrity(unsigned long clone_flags,
+					struct task_struct *tsk)
+{
+	int ret = 0;
+
+	if (clone_flags & CLONE_VM) {
+		task_integrity_get(TASK_INTEGRITY(current));
+		task_integrity_assign(tsk, TASK_INTEGRITY(current));
+	} else {
+		task_integrity_assign(tsk, task_integrity_alloc());
+
+		if (!TASK_INTEGRITY(tsk))
+			ret = -ENOMEM;
+	}
+
+	return ret;
+}
+
+static inline void task_integrity_cleanup(struct task_struct *tsk)
+{
+	task_integrity_put(TASK_INTEGRITY(tsk));
+}
+
+static inline int task_integrity_apply(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	int ret = 0;
+
+	if (!(clone_flags & CLONE_VM))
+		ret = five_fork(current, tsk);
+
+	return ret;
+}
+#else
+static inline int dup_task_integrity(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	return 0;
+}
+
+static inline void task_integrity_cleanup(struct task_struct *tsk)
+{
+}
+
+static inline int task_integrity_apply(unsigned long clone_flags,
+						struct task_struct *tsk)
+{
+	return 0;
+}
+
+#endif
+
 static inline void rcu_copy_process(struct task_struct *p)
 {
 #ifdef CONFIG_PREEMPT_RCU
@@ -1948,6 +2049,8 @@ static __latent_entropy struct task_struct *copy_process(
 	if (!p)
 		goto fork_out;
 
+	cpufreq_task_times_init(p);
+
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
 	 * to any of the bad_fork_* labels. This is to avoid freeing
@@ -2083,9 +2186,14 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_perf;
 	/* copy all the process information */
 	shm_init_task(p);
-	retval = security_task_alloc(p, clone_flags);
+	retval = dup_task_integrity(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_audit;
+	retval = security_task_alloc(p, clone_flags);
+	if (retval) {
+		task_integrity_cleanup(p);
+		goto bad_fork_cleanup_audit;
+	}
 	retval = copy_semundo(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_security;
@@ -2256,6 +2364,10 @@ static __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cancel_cgroup;
 	}
 
+	retval = task_integrity_apply(clone_flags, p);
+	if (retval)
+		goto bad_fork_cancel_cgroup;
+
 	/* past the last point of failure */
 	if (pidfile)
 		fd_install(pidfd, pidfile);
@@ -2318,6 +2430,10 @@ static __latent_entropy struct task_struct *copy_process(
 
 	copy_oom_score_adj(clone_flags, p);
 
+#ifdef CONFIG_KDP_CRED
+	if (kdp_enable)
+		kdp_assign_pgd(p);
+#endif
 	return p;
 
 bad_fork_cancel_cgroup:
@@ -2468,6 +2584,8 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
+	cpufreq_task_times_alloc(p);
+
 	/*
 	 * Do this prior waking up the new thread - the thread pointer
 	 * might get invalid after that point, if the thread exits quickly.
@@ -2476,6 +2594,10 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 
 	pid = get_task_pid(p, PIDTYPE_PID);
 	nr = pid_vnr(pid);
+
+#ifdef CONFIG_SECURITY_DEFEX
+	task_defex_zero_creds(p);
+#endif
 
 	if (clone_flags & CLONE_PARENT_SETTID)
 		put_user(nr, args->parent_tid);

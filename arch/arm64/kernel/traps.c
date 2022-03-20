@@ -27,6 +27,7 @@
 #include <linux/syscalls.h>
 #include <linux/mm_types.h>
 #include <linux/kasan.h>
+#include <linux/sec_debug.h>
 
 #include <asm/atomic.h>
 #include <asm/bug.h>
@@ -45,6 +46,8 @@
 #include <asm/exception.h>
 #include <asm/system_misc.h>
 #include <asm/sysreg.h>
+
+#include <trace/hooks/traps.h>
 
 static const char *handler[]= {
 	"Synchronous Abort",
@@ -104,7 +107,12 @@ static int __die(const char *str, int err, struct pt_regs *regs)
 		return ret;
 
 	print_modules();
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+	__show_regs(regs);
+	dump_backtrace_auto_comment(regs, NULL);
+#else
 	show_regs(regs);
+#endif
 
 	dump_kernel_instr(KERN_EMERG, regs);
 
@@ -171,32 +179,32 @@ static void arm64_show_signal(int signo, const char *str)
 	__show_regs(regs);
 }
 
-void arm64_force_sig_fault(int signo, int code, void __user *addr,
+void arm64_force_sig_fault(int signo, int code, unsigned long far,
 			   const char *str)
 {
 	arm64_show_signal(signo, str);
 	if (signo == SIGKILL)
 		force_sig(SIGKILL);
 	else
-		force_sig_fault(signo, code, addr);
+		force_sig_fault(signo, code, (void __user *)far);
 }
 
-void arm64_force_sig_mceerr(int code, void __user *addr, short lsb,
+void arm64_force_sig_mceerr(int code, unsigned long far, short lsb,
 			    const char *str)
 {
 	arm64_show_signal(SIGBUS, str);
-	force_sig_mceerr(code, addr, lsb);
+	force_sig_mceerr(code, (void __user *)far, lsb);
 }
 
-void arm64_force_sig_ptrace_errno_trap(int errno, void __user *addr,
+void arm64_force_sig_ptrace_errno_trap(int errno, unsigned long far,
 				       const char *str)
 {
 	arm64_show_signal(SIGTRAP, str);
-	force_sig_ptrace_errno_trap(errno, addr);
+	force_sig_ptrace_errno_trap(errno, (void __user *)far);
 }
 
 void arm64_notify_die(const char *str, struct pt_regs *regs,
-		      int signo, int sicode, void __user *addr,
+		      int signo, int sicode, unsigned long far,
 		      int err)
 {
 	if (user_mode(regs)) {
@@ -204,7 +212,7 @@ void arm64_notify_die(const char *str, struct pt_regs *regs,
 		current->thread.fault_address = 0;
 		current->thread.fault_code = err;
 
-		arm64_force_sig_fault(signo, sicode, addr, str);
+		arm64_force_sig_fault(signo, sicode, far, str);
 	} else {
 		die(str, regs, err);
 	}
@@ -375,7 +383,7 @@ void force_signal_inject(int signal, int code, unsigned long address, unsigned i
 		signal = SIGKILL;
 	}
 
-	arm64_notify_die(desc, regs, signal, code, (void __user *)address, err);
+	arm64_notify_die(desc, regs, signal, code, address, err);
 }
 
 /*
@@ -386,7 +394,7 @@ void arm64_notify_segfault(unsigned long addr)
 	int code;
 
 	mmap_read_lock(current->mm);
-	if (find_vma(current->mm, addr) == NULL)
+	if (find_vma(current->mm, untagged_addr(addr)) == NULL)
 		code = SEGV_MAPERR;
 	else
 		code = SEGV_ACCERR;
@@ -394,6 +402,18 @@ void arm64_notify_segfault(unsigned long addr)
 
 	force_signal_inject(SIGSEGV, code, addr, 0);
 }
+
+#ifdef CONFIG_S3C2410_BUILTIN_WATCHDOG
+extern int s3c2410wdt_builtin_expire_watchdog(void);
+static __always_inline void do_s3c2410wdt_builtin_expire_watchdog(void)
+{
+	s3c2410wdt_builtin_expire_watchdog();
+}
+#else
+static inline void do_s3c2410wdt_builtin_expire_watchdog(void)
+{
+}
+#endif
 
 void do_undefinstr(struct pt_regs *regs)
 {
@@ -403,6 +423,16 @@ void do_undefinstr(struct pt_regs *regs)
 
 	if (call_undef_hook(regs) == 0)
 		return;
+
+	trace_android_rvh_do_undefinstr(regs, user_mode(regs));
+
+	if (IS_ENABLED(CONFIG_SEC_DEBUG_FAULT_MSG_ADV) && !user_mode(regs)) {
+		pr_auto(ASL1, "%s: pc=0x%016llx\n",
+			"undefined instruction", regs->pc);
+		dump_kernel_instr(KERN_INFO, regs);
+		do_s3c2410wdt_builtin_expire_watchdog();
+		die("undefined instruction", regs, 0);
+	}
 
 	BUG_ON(!user_mode(regs));
 	force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
@@ -416,14 +446,88 @@ void do_bti(struct pt_regs *regs)
 }
 NOKPROBE_SYMBOL(do_bti);
 
+#define show_pac_key_single_kern(k, uk, kk)					\
+do {										\
+	u64 lo, hi;								\
+	lo = read_sysreg_s(SYS_ ## k ## KEYLO_EL1);				\
+	hi = read_sysreg_s(SYS_ ## k ## KEYHI_EL1);				\
+	pr_auto(ASL1, #k "KEY_EL1: REG %016lx::%016lx, USER %016lx::%016lx, KERN %016lx::%016lx\n", \
+		hi, lo, (uk).hi, (uk).lo, (kk).hi, (kk).lo);			\
+} while (0)
+
+#define show_pac_key_single(k, uk)						\
+do {										\
+	u64 lo, hi;								\
+	lo = read_sysreg_s(SYS_ ## k ## KEYLO_EL1);				\
+	hi = read_sysreg_s(SYS_ ## k ## KEYHI_EL1);				\
+	pr_auto(ASL1, #k "KEY_EL1: REG %016lx::%016lx, USER %016lx::%016lx\n",		\
+		hi, lo, (uk).hi, (uk).lo);					\
+} while (0)
+
+#ifdef CONFIG_ARM64_PTR_AUTH
+static void show_pac_keys(struct ptrauth_keys_user *userk, struct ptrauth_keys_kernel *kernk)
+{
+	pr_crit("PtrAuth status: address auth? %d, generic auth? %d\n",
+		system_supports_address_auth(), system_supports_generic_auth());
+
+	if (!system_supports_address_auth() && !system_supports_generic_auth())
+		return;
+
+	if (system_supports_address_auth()) {
+		show_pac_key_single_kern(APIA, userk->apia, kernk->apia);
+		show_pac_key_single(APIB, userk->apib);
+		show_pac_key_single(APDA, userk->apda);
+		show_pac_key_single(APDB, userk->apdb);
+	}
+
+	if (system_supports_generic_auth())
+		show_pac_key_single(APGA, userk->apga);
+}
+#endif
+
+#ifdef CONFIG_S3C2410_BUILTIN_WATCHDOG
+extern int s3c2410wdt_builtin_expire_watchdog(void);
+
+static __always_inline void __call_expire_watchdog(void)
+{
+	s3c2410wdt_builtin_expire_watchdog();
+	mdelay(10000);
+}
+#else
+static inline void __call_expire_watchdog(void) { }
+#endif /* CONFIG_S3C2410_BUILTIN_WATCHDOG */
+
 void do_ptrauth_fault(struct pt_regs *regs, unsigned int esr)
 {
 	/*
 	 * Unexpected FPAC exception or pointer authentication failure in
 	 * the kernel: kill the task before it does any more harm.
 	 */
-	BUG_ON(!user_mode(regs));
-	force_signal_inject(SIGILL, ILL_ILLOPN, regs->pc, esr);
+	if (user_mode(regs)) {
+		force_signal_inject(SIGILL, ILL_ILLOPN, regs->pc, esr);
+		return;
+	}
+
+	trace_android_rvh_bad_mode(regs, esr, 0xFA017);
+
+	console_verbose();
+
+	pr_auto(ASL1, "Wrong PAC detected on CPU%d, LR 0x%010lx, code 0x%08x -- %s\n",
+		smp_processor_id(), regs->regs[30], esr, esr_get_class_string(esr));
+#ifdef CONFIG_ARM64_PTR_AUTH
+	show_pac_keys(&current->thread.keys_user, &current->thread.keys_kernel);
+#endif
+
+#ifdef CONFIG_SEC_DEBUG_AUTO_COMMENT
+	show_regs_auto_comment(regs, 1);
+#else
+	__show_regs(regs);
+#endif
+	local_daif_mask();
+
+	__call_expire_watchdog();
+
+	panic("ptrauth fault");
 }
 NOKPROBE_SYMBOL(do_ptrauth_fault);
 
@@ -449,12 +553,13 @@ NOKPROBE_SYMBOL(do_ptrauth_fault);
 
 static void user_cache_maint_handler(unsigned int esr, struct pt_regs *regs)
 {
-	unsigned long address;
+	unsigned long tagged_address, address;
 	int rt = ESR_ELx_SYS64_ISS_RT(esr);
 	int crm = (esr & ESR_ELx_SYS64_ISS_CRM_MASK) >> ESR_ELx_SYS64_ISS_CRM_SHIFT;
 	int ret = 0;
 
-	address = untagged_addr(pt_regs_read_reg(regs, rt));
+	tagged_address = pt_regs_read_reg(regs, rt);
+	address = untagged_addr(tagged_address);
 
 	switch (crm) {
 	case ESR_ELx_SYS64_ISS_CRM_DC_CVAU:	/* DC CVAU, gets promoted */
@@ -481,7 +586,7 @@ static void user_cache_maint_handler(unsigned int esr, struct pt_regs *regs)
 	}
 
 	if (ret)
-		arm64_notify_segfault(address);
+		arm64_notify_segfault(tagged_address);
 	else
 		arm64_skip_faulting_instruction(regs, AARCH64_INSN_SIZE);
 }
@@ -760,10 +865,11 @@ asmlinkage void notrace bad_mode(struct pt_regs *regs, int reason, unsigned int 
 
 	console_verbose();
 
-	pr_crit("Bad mode in %s handler detected on CPU%d, code 0x%08x -- %s\n",
+	pr_auto(ASL1, "Bad mode in %s handler detected on CPU%d, code 0x%08x -- %s\n",
 		handler[reason], smp_processor_id(), esr,
 		esr_get_class_string(esr));
 
+	trace_android_rvh_bad_mode(regs, esr, reason);
 	__show_regs(regs);
 	local_daif_mask();
 	panic("bad mode");
@@ -775,7 +881,7 @@ asmlinkage void notrace bad_mode(struct pt_regs *regs, int reason, unsigned int 
  */
 void bad_el0_sync(struct pt_regs *regs, int reason, unsigned int esr)
 {
-	void __user *pc = (void __user *)instruction_pointer(regs);
+	unsigned long pc = instruction_pointer(regs);
 
 	current->thread.fault_address = 0;
 	current->thread.fault_code = esr;
@@ -797,6 +903,7 @@ asmlinkage void noinstr handle_bad_stack(struct pt_regs *regs)
 	unsigned int esr = read_sysreg(esr_el1);
 	unsigned long far = read_sysreg(far_el1);
 
+	secdbg_base_built_check_handle_bad_stack();
 	arm64_enter_nmi(regs);
 
 	console_verbose();
@@ -827,8 +934,10 @@ void __noreturn arm64_serror_panic(struct pt_regs *regs, u32 esr)
 {
 	console_verbose();
 
-	pr_crit("SError Interrupt on CPU%d, code 0x%08x -- %s\n",
+	pr_auto(ASL1, "SError Interrupt on CPU%d, code 0x%08x -- %s\n",
 		smp_processor_id(), esr, esr_get_class_string(esr));
+
+	trace_android_rvh_arm64_serror_panic(regs, esr);
 	if (regs)
 		__show_regs(regs);
 

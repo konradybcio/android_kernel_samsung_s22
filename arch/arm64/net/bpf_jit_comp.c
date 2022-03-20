@@ -17,8 +17,14 @@
 #include <asm/cacheflush.h>
 #include <asm/debug-monitors.h>
 #include <asm/set_memory.h>
+#include <trace/hooks/memory.h>
 
 #include "bpf_jit.h"
+
+#ifdef CONFIG_RKP
+#include <linux/uh.h>
+#include <linux/rkp.h>
+#endif
 
 #define TMP_REG_1 (MAX_BPF_JIT_REG + 0)
 #define TMP_REG_2 (MAX_BPF_JIT_REG + 1)
@@ -1098,6 +1104,8 @@ skip_init_ctx:
 			goto out_off;
 		}
 		bpf_jit_binary_lock_ro(header);
+		trace_android_vh_set_memory_ro((unsigned long)header, header->pages);
+		trace_android_vh_set_memory_x((unsigned long)header, header->pages);
 	} else {
 		jit_data->ctx = ctx;
 		jit_data->image = image_ptr;
@@ -1106,6 +1114,9 @@ skip_init_ctx:
 	prog->bpf_func = (void *)ctx.image;
 	prog->jited = 1;
 	prog->jited_len = prog_size;
+#ifdef CONFIG_RKP
+	uh_call(UH_APP_RKP, RKP_BPF_LOAD, (u64)header, (u64)(header->pages * PAGE_SIZE), 0, 0);
+#endif
 
 	if (!prog->is_func || extra_pass) {
 		bpf_prog_fill_jited_linfo(prog, ctx.offset + 1);

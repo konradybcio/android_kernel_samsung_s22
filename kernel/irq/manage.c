@@ -21,6 +21,7 @@
 #include <linux/sched/isolation.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/task_work.h>
+#include <linux/sec_debug.h>
 
 #include "internals.h"
 
@@ -129,6 +130,7 @@ void synchronize_irq(unsigned int irq)
 	struct irq_desc *desc = irq_to_desc(irq);
 
 	if (desc) {
+		secdbg_base_built_set_task_in_sync_irq(current, irq, desc);
 		__synchronize_hardirq(desc, true);
 		/*
 		 * We made sure that no hardirq handler is
@@ -137,6 +139,7 @@ void synchronize_irq(unsigned int irq)
 		 */
 		wait_event(desc->wait_for_threads,
 			   !atomic_read(&desc->threads_active));
+		secdbg_base_built_set_task_in_sync_irq(NULL, 0, NULL);
 	}
 }
 EXPORT_SYMBOL(synchronize_irq);
@@ -280,6 +283,7 @@ int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(irq_do_set_affinity);
 
 #ifdef CONFIG_GENERIC_PENDING_IRQ
 static inline int irq_set_affinity_pending(struct irq_data *data,
@@ -1627,6 +1631,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			irqd_set(&desc->irq_data, IRQD_NO_BALANCING);
 		}
 
+		if (new->flags & IRQF_GIC_MULTI_TARGET)
+			irqd_set(&desc->irq_data, IRQD_GIC_MULTI_TARGET);
+
 		if (irq_settings_can_autoenable(desc)) {
 			irq_startup(desc, IRQ_RESEND, IRQ_START_COND);
 		} else {
@@ -1640,7 +1647,6 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			/* Undo nested disables: */
 			desc->depth = 1;
 		}
-
 	} else if (new->flags & IRQF_TRIGGER_MASK) {
 		unsigned int nmsk = new->flags & IRQF_TRIGGER_MASK;
 		unsigned int omsk = irqd_get_trigger_type(&desc->irq_data);

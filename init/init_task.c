@@ -12,6 +12,7 @@
 #include <linux/audit.h>
 #include <linux/numa.h>
 #include <linux/scs.h>
+#include <linux/task_integrity.h>
 
 #include <linux/uaccess.h>
 
@@ -49,6 +50,11 @@ static struct sighand_struct init_sighand = {
 	.siglock	= __SPIN_LOCK_UNLOCKED(init_sighand.siglock),
 	.signalfd_wqh	= __WAIT_QUEUE_HEAD_INITIALIZER(init_sighand.signalfd_wqh),
 };
+
+#ifdef CONFIG_FIVE
+static struct task_integrity init_integrity =
+					INIT_TASK_INTEGRITY(init_integrity);
+#endif
 
 #ifdef CONFIG_SHADOW_CALL_STACK
 unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)]
@@ -176,7 +182,7 @@ struct task_struct init_task
 	.numa_group	= NULL,
 	.numa_faults	= NULL,
 #endif
-#ifdef CONFIG_KASAN
+#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 	.kasan_depth	= 1,
 #endif
 #ifdef CONFIG_KCSAN
@@ -213,6 +219,7 @@ struct task_struct init_task
 #ifdef CONFIG_SECCOMP_FILTER
 	.seccomp	= { .filter_count = ATOMIC_INIT(0) },
 #endif
+	INIT_INTEGRITY(init_task)
 };
 EXPORT_SYMBOL(init_task);
 

@@ -71,6 +71,7 @@
 
 #define MADV_COLD	20		/* deactivate these pages */
 #define MADV_PAGEOUT	21		/* reclaim these pages */
+#define MADV_WRITEBACK	29
 
 /* compatibility flags */
 #define MAP_FILE	0

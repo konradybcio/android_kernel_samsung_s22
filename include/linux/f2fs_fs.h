@@ -34,6 +34,7 @@
 #define F2FS_ROOT_INO(sbi)	((sbi)->root_ino_num)
 #define F2FS_NODE_INO(sbi)	((sbi)->node_ino_num)
 #define F2FS_META_INO(sbi)	((sbi)->meta_ino_num)
+#define F2FS_COMPRESS_INO(sbi)	(NM_I(sbi)->max_nid)
 
 #define F2FS_MAX_QUOTAS		3
 
@@ -115,7 +116,8 @@ struct f2fs_super_block {
 	__u8 hot_ext_count;		/* # of hot file extension */
 	__le16  s_encoding;		/* Filename charset encoding */
 	__le16  s_encoding_flags;	/* Filename charset encoding flags */
-	__u8 reserved[306];		/* valid reserved region */
+	__u8 reserved[242];		/* valid reserved region */
+	__u8 mount_opts[64];            /* default mount option for SEC */
 	__le32 crc;			/* checksum of superblock */
 } __packed;
 
@@ -168,7 +170,7 @@ struct f2fs_checkpoint {
 	unsigned char alloc_type[MAX_ACTIVE_LOGS];
 
 	/* SIT and NAT version bitmap */
-	unsigned char sit_nat_version_bitmap[1];
+	unsigned char sit_nat_version_bitmap[];
 } __packed;
 
 #define CP_CHKSUM_OFFSET	4092	/* default chksum offset in checkpoint */
@@ -229,6 +231,7 @@ struct f2fs_extent {
 #define F2FS_INLINE_DOTS	0x10	/* file having implicit dot dentries */
 #define F2FS_EXTRA_ATTR		0x20	/* file having extra attribute */
 #define F2FS_PIN_FILE		0x40	/* file should not be gced */
+#define F2FS_COMPRESS_RELEASED	0x80	/* file released compressed blocks */
 
 struct f2fs_inode {
 	__le16 i_mode;			/* file mode */
@@ -273,7 +276,10 @@ struct f2fs_inode {
 			__le64 i_compr_blocks;	/* # of compressed blocks */
 			__u8 i_compress_algorithm;	/* compress algorithm */
 			__u8 i_log_cluster_size;	/* log of cluster size */
-			__le16 i_padding;		/* padding */
+			__le16 i_compress_flag;		/* compress flag */
+						/* 0 bit: chksum flag
+						 * [10,15] bits: compress level
+						 */
 			__le32 i_extra_end[0];	/* for attribute size calculation */
 		} __packed;
 		__le32 i_addr[DEF_ADDRS_PER_INODE];	/* Pointers to data blocks */
@@ -558,5 +564,18 @@ enum {
 #define S_SHIFT 12
 
 #define	F2FS_DEF_PROJID		0	/* default project ID */
+
+#define	F2FS_SEC_EXTRA_FSCK_MAGIC	0xF5CE45EC
+struct f2fs_sb_extra_flag_blk {
+	__le32 need_fsck;
+	__le32 spo_counter;
+	__le64 fsck_read_bytes;
+	__le64 fsck_written_bytes;
+	__le64 fsck_elapsed_time;
+	__le32 fsck_exit_code;
+	__le32 valid_node_count;
+	__le32 valid_inode_count;
+	__u8   rsvd[4052];
+} __packed;
 
 #endif  /* _LINUX_F2FS_FS_H */

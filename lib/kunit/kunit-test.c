@@ -152,6 +152,19 @@ static void kunit_resource_test_alloc_resource(struct kunit *test)
 					   ctx);
 
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, res);
+	/* NOTE:
+	 * To support EXPECT_EQ(test, pointer var, pointer var) at LEGO/DEVICE,
+	 * casted (long long) to left, right variable at KUNIT_BASE_ASSERTION.
+	 * This casting can resolve the build error;
+	 * "initialization makes integer from pointer without a cast"
+	 * Until 4.19 kernel(alpha/master), EXPECT_EQ can cover pointer variable.
+	 * On the other hand, in 5.10 mainline kernel, KUNIT_EXPECT_PTR_EQ can compares pointer variables.
+	 * But, (long long) casting causes build error at KUNIT_EXPECT_PTR_EQ like below statement;
+	 * "initialization makes pointer from integer without a cast"
+	 *
+	 * From 5.15+ kernel, we will not allow EXPECT_EQ(test, pointer var, pointer var).
+	 * You SHOULD use KUNIT_EXPECT_PTR_EQ to compare pointer variable complying with like below statement.
+	 */
 	KUNIT_EXPECT_PTR_EQ(test,
 			    &ctx->is_resource_initialized,
 			    (bool *)res->data);
@@ -317,7 +330,19 @@ static void kunit_resource_test_static(struct kunit *test)
 
 	KUNIT_EXPECT_EQ(test, kunit_add_resource(test, NULL, NULL, &res, &ctx),
 			0);
-
+	/* NOTE:
+	 * To support EXPECT_EQ(test, pointer var, pointer var) at LEGO/DEVICE,
+	 * casted (long long) to left, right variable at KUNIT_BASE_ASSERTION.
+	 * This casting can resolve the build error;
+	 * "initialization makes integer from pointer without a cast"
+	 * Until 4.19 kernel(alpha/master), EXPECT_EQ can cover pointer variable.
+	 * On the other hand, in 5.10 mainline kernel, KUNIT_EXPECT_PTR_EQ can compares pointer variables.
+	 * But, (long long) casting causes build error at KUNIT_EXPECT_PTR_EQ like below statement;
+	 * "initialization makes pointer from integer without a cast"
+	 *
+	 * From 5.15+ kernel, we will not allow EXPECT_EQ(test, pointer var, pointer var).
+	 * You SHOULD use KUNIT_EXPECT_PTR_EQ to compare pointer variable complying with like below statement.
+	 */
 	KUNIT_EXPECT_PTR_EQ(test, res.data, (void *)&ctx);
 
 	kunit_cleanup(test);
@@ -334,6 +359,19 @@ static void kunit_resource_test_named(struct kunit *test)
 			kunit_add_named_resource(test, NULL, NULL, &res1,
 						 "resource_1", &ctx),
 			0);
+	/* NOTE:
+	 * To support EXPECT_EQ(test, pointer var, pointer var) at LEGO/DEVICE,
+	 * casted (long long) to left, right variable at KUNIT_BASE_ASSERTION.
+	 * This casting can resolve the build error;
+	 * "initialization makes integer from pointer without a cast"
+	 * Until 4.19 kernel(alpha/master), EXPECT_EQ can cover pointer variable.
+	 * On the other hand, in 5.10 mainline kernel, KUNIT_EXPECT_PTR_EQ can compares pointer variables.
+	 * But, (long long) casting causes build error at KUNIT_EXPECT_PTR_EQ like below statement;
+	 * "initialization makes pointer from integer without a cast"
+	 *
+	 * From 5.15+ kernel, we will not allow EXPECT_EQ(test, pointer var, pointer var).
+	 * You SHOULD use KUNIT_EXPECT_PTR_EQ to compare pointer variable complying with like below statement.
+	 */
 	KUNIT_EXPECT_PTR_EQ(test, res1.data, (void *)&ctx);
 
 	KUNIT_EXPECT_EQ(test,
@@ -348,6 +386,19 @@ static void kunit_resource_test_named(struct kunit *test)
 
 	found = kunit_find_named_resource(test, "resource_1");
 
+	/* NOTE:
+	 * To support EXPECT_EQ(test, pointer var, pointer var) at LEGO/DEVICE,
+	 * casted (long long) to left, right variable at KUNIT_BASE_ASSERTION.
+	 * This casting can resolve the build error;
+	 * "initialization makes integer from pointer without a cast"
+	 * Until 4.19 kernel(alpha/master), EXPECT_EQ can cover pointer variable.
+	 * On the other hand, in 5.10 mainline kernel, KUNIT_EXPECT_PTR_EQ can compares pointer variables.
+	 * But, (long long) casting causes build error at KUNIT_EXPECT_PTR_EQ like below statement;
+	 * "initialization makes pointer from integer without a cast"
+	 *
+	 * From 5.15+ kernel, we will not allow EXPECT_EQ(test, pointer var, pointer var).
+	 * You SHOULD use KUNIT_EXPECT_PTR_EQ to compare pointer variable complying with like below statement.
+	 */
 	KUNIT_EXPECT_PTR_EQ(test, found, &res1);
 
 	if (found)
@@ -432,6 +483,19 @@ static void kunit_log_test(struct kunit *test)
 	KUNIT_EXPECT_NOT_ERR_OR_NULL(test,
 				     strstr(suite->log, "along with this."));
 #else
+	/* NOTE:
+	 * To support EXPECT_EQ(test, pointer var, pointer var) at LEGO/DEVICE,
+	 * casted (long long) to left, right variable at KUNIT_BASE_ASSERTION.
+	 * This casting can resolve the build error;
+	 * "initialization makes integer from pointer without a cast"
+	 * Until 4.19 kernel(alpha/master), EXPECT_EQ can cover pointer variable.
+	 * On the other hand, in 5.10 mainline kernel, KUNIT_EXPECT_PTR_EQ can compares pointer variables.
+	 * But, (long long) casting causes build error at KUNIT_EXPECT_PTR_EQ like below statement;
+	 * "initialization makes pointer from integer without a cast"
+	 *
+	 * From 5.15+ kernel, we will not allow EXPECT_EQ(test, pointer var, pointer var).
+	 * You SHOULD use KUNIT_EXPECT_PTR_EQ to compare pointer variable complying with like below statement.
+	 */
 	KUNIT_EXPECT_PTR_EQ(test, test->log, (char *)NULL);
 	KUNIT_EXPECT_PTR_EQ(test, suite->log, (char *)NULL);
 #endif

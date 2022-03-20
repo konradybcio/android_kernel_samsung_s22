@@ -68,6 +68,11 @@
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/mmu_context.h>
+#include <trace/hooks/mm.h>
+
+#ifdef CONFIG_SECURITY_DEFEX
+#include <linux/defex.h>
+#endif
 
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
@@ -484,6 +489,7 @@ static void exit_mm(void)
 	enter_lazy_tlb(mm, current);
 	task_unlock(current);
 	mm_update_next_owner(mm);
+	trace_android_vh_exit_mm(mm);
 	mmput(mm);
 	if (test_thread_flag(TIF_MEMDIE))
 		exit_oom_victim();
@@ -714,6 +720,10 @@ void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
 	int group_dead;
+
+#ifdef CONFIG_SECURITY_DEFEX
+	task_defex_zero_creds(current);
+#endif
 
 	/*
 	 * We can get here from a kernel oops, sometimes with preemption off.

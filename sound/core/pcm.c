@@ -809,8 +809,12 @@ EXPORT_SYMBOL(snd_pcm_new_internal);
 
 static void free_chmap(struct snd_pcm_str *pstr)
 {
+	struct snd_pcm *pcm = pstr->pcm;
+
 	if (pstr->chmap_kctl) {
+		down_write(&pcm->card->controls_rwsem);
 		snd_ctl_remove(pstr->pcm->card, pstr->chmap_kctl);
+		up_write(&pcm->card->controls_rwsem);
 		pstr->chmap_kctl = NULL;
 	}
 }

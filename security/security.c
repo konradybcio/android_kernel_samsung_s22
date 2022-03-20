@@ -28,45 +28,13 @@
 #include <linux/backing-dev.h>
 #include <linux/string.h>
 #include <linux/msg.h>
+#include <linux/task_integrity.h>
 #include <net/flow.h>
 
 #define MAX_LSM_EVM_XATTR	2
 
 /* How many LSMs were built into the kernel? */
 #define LSM_COUNT (__end_lsm_info - __start_lsm_info)
-
-/*
- * These are descriptions of the reasons that can be passed to the
- * security_locked_down() LSM hook. Placing this array here allows
- * all security modules to use the same descriptions for auditing
- * purposes.
- */
-const char *const lockdown_reasons[LOCKDOWN_CONFIDENTIALITY_MAX+1] = {
-	[LOCKDOWN_NONE] = "none",
-	[LOCKDOWN_MODULE_SIGNATURE] = "unsigned module loading",
-	[LOCKDOWN_DEV_MEM] = "/dev/mem,kmem,port",
-	[LOCKDOWN_EFI_TEST] = "/dev/efi_test access",
-	[LOCKDOWN_KEXEC] = "kexec of unsigned images",
-	[LOCKDOWN_HIBERNATION] = "hibernation",
-	[LOCKDOWN_PCI_ACCESS] = "direct PCI access",
-	[LOCKDOWN_IOPORT] = "raw io port access",
-	[LOCKDOWN_MSR] = "raw MSR access",
-	[LOCKDOWN_ACPI_TABLES] = "modifying ACPI tables",
-	[LOCKDOWN_PCMCIA_CIS] = "direct PCMCIA CIS storage",
-	[LOCKDOWN_TIOCSSERIAL] = "reconfiguration of serial port IO",
-	[LOCKDOWN_MODULE_PARAMETERS] = "unsafe module parameters",
-	[LOCKDOWN_MMIOTRACE] = "unsafe mmio",
-	[LOCKDOWN_DEBUGFS] = "debugfs access",
-	[LOCKDOWN_XMON_WR] = "xmon write access",
-	[LOCKDOWN_INTEGRITY_MAX] = "integrity",
-	[LOCKDOWN_KCORE] = "/proc/kcore access",
-	[LOCKDOWN_KPROBES] = "use of kprobes",
-	[LOCKDOWN_BPF_READ] = "use of bpf to read kernel RAM",
-	[LOCKDOWN_PERF] = "unsafe use of perf",
-	[LOCKDOWN_TRACEFS] = "use of tracefs",
-	[LOCKDOWN_XMON_RW] = "xmon read and write access",
-	[LOCKDOWN_CONFIDENTIALITY_MAX] = "confidentiality",
-};
 
 struct security_hook_heads security_hook_heads __lsm_ro_after_init;
 static BLOCKING_NOTIFIER_HEAD(blocking_lsm_notifier_chain);
@@ -698,10 +666,18 @@ static void __init lsm_early_task(struct task_struct *task)
  *	This is a hook that returns a value.
  */
 
+/*
+ * security_integrity_current() is added,
+
+ * which has a dependency of CONFIG_KDP_CRED.
+ * security_integrity_current is added to check integrity of credential context.
+ * if CONFIG_KDP_CRED is disabled, it will always return 0.
+ */
 #define call_void_hook(FUNC, ...)				\
 	do {							\
 		struct security_hook_list *P;			\
 								\
+		if(security_integrity_current()) break;		\
 		hlist_for_each_entry(P, &security_hook_heads.FUNC, list) \
 			P->hook.FUNC(__VA_ARGS__);		\
 	} while (0)
@@ -711,6 +687,9 @@ static void __init lsm_early_task(struct task_struct *task)
 	do {							\
 		struct security_hook_list *P;			\
 								\
+		RC = security_integrity_current();		\
+		if (RC != 0)					\
+			break;					\
 		hlist_for_each_entry(P, &security_hook_heads.FUNC, list) { \
 			RC = P->hook.FUNC(__VA_ARGS__);		\
 			if (RC != 0)				\
@@ -1058,6 +1037,14 @@ out:
 }
 EXPORT_SYMBOL(security_inode_init_security);
 
+int security_inode_init_security_anon(struct inode *inode,
+				      const struct qstr *name,
+				      const struct inode *context_inode)
+{
+	return call_int_hook(inode_init_security_anon, 0, inode, name,
+			     context_inode);
+}
+
 int security_old_inode_init_security(struct inode *inode, struct inode *dir,
 				     const struct qstr *qstr, const char **name,
 				     void **value, size_t *len)
@@ -1297,6 +1284,9 @@ int security_inode_setxattr(struct dentry *dentry, const char *name,
 		ret = cap_inode_setxattr(dentry, name, value, size, flags);
 	if (ret)
 		return ret;
+	ret = five_inode_setxattr(dentry, name, value, size);
+	if (ret)
+		return ret;
 	ret = ima_inode_setxattr(dentry, name, value, size);
 	if (ret)
 		return ret;
@@ -1339,6 +1329,9 @@ int security_inode_removexattr(struct dentry *dentry, const char *name)
 	ret = call_int_hook(inode_removexattr, 1, dentry, name);
 	if (ret == 1)
 		ret = cap_inode_removexattr(dentry, name);
+	if (ret)
+		return ret;
+	ret = five_inode_removexattr(dentry, name);
 	if (ret)
 		return ret;
 	ret = ima_inode_removexattr(dentry, name);
@@ -1523,6 +1516,9 @@ int security_mmap_file(struct file *file, unsigned long prot,
 					mmap_prot(file, prot), flags);
 	if (ret)
 		return ret;
+	ret = five_file_mmap(file, prot);
+	if (ret)
+		return ret;
 	return ima_file_mmap(file, prot);
 }
 
@@ -1576,7 +1572,11 @@ int security_file_open(struct file *file)
 	if (ret)
 		return ret;
 
-	return fsnotify_perm(file, MAY_OPEN);
+	ret = fsnotify_perm(file, MAY_OPEN);
+	if (ret)
+		return ret;
+
+	return five_file_open(file);
 }
 
 int security_task_alloc(struct task_struct *task, unsigned long clone_flags)
@@ -1594,6 +1594,7 @@ int security_task_alloc(struct task_struct *task, unsigned long clone_flags)
 void security_task_free(struct task_struct *task)
 {
 	call_void_hook(task_free, task);
+	five_task_free(task);
 
 	kfree(task->security);
 	task->security = NULL;
@@ -1623,8 +1624,17 @@ void security_cred_free(struct cred *cred)
 
 	call_void_hook(cred_free, cred);
 
+#ifdef CONFIG_KDP_CRED
+	if (is_kdp_protect_addr((unsigned long)cred)) {
+		kdp_free_security((unsigned long)cred->security);
+		uh_call(UH_APP_KDP, SELINUX_CRED_FREE, (u64) &cred->security, 0, 0, 0);
+	} else {
+#endif
 	kfree(cred->security);
 	cred->security = NULL;
+#ifdef CONFIG_KDP_CRED
+	}
+#endif
 }
 
 int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp)

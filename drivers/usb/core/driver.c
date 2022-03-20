@@ -34,6 +34,7 @@
 
 #include "usb.h"
 
+#include <trace/hooks/usb.h>
 
 /*
  * Adds a new dynamic USBdevice ID to this driver,
@@ -939,7 +940,15 @@ static int usb_uevent(struct device *dev, struct kobj_uevent_env *env)
 			   usb_dev->descriptor.bDeviceSubClass,
 			   usb_dev->descriptor.bDeviceProtocol))
 		return -ENOMEM;
-
+#ifdef CONFIG_USB_DEBUG_DETAILED_LOG
+	pr_info("usb_host : %s: PRODUCT=%x/%x/%x TYPE=%d/%d/%d\n", __func__,
+			   le16_to_cpu(usb_dev->descriptor.idVendor),
+			   le16_to_cpu(usb_dev->descriptor.idProduct),
+			   le16_to_cpu(usb_dev->descriptor.bcdDevice),
+			   usb_dev->descriptor.bDeviceClass,
+			   usb_dev->descriptor.bDeviceSubClass,
+			   usb_dev->descriptor.bDeviceProtocol);
+#endif
 	return 0;
 }
 
@@ -1403,9 +1412,14 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 	int			status = 0;
 	int			i = 0, n = 0;
 	struct usb_interface	*intf;
+	int			bypass = 0;
 
 	if (udev->state == USB_STATE_NOTATTACHED ||
 			udev->state == USB_STATE_SUSPENDED)
+		goto done;
+
+	trace_android_vh_usb_dev_suspend(udev, msg, &bypass);
+	if (bypass)
 		goto done;
 
 	/* Suspend all the interfaces and then udev itself */
@@ -1505,10 +1519,24 @@ static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 	int			i;
 	struct usb_interface	*intf;
 
+	int			bypass = 0;
+
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+	if (!udev || udev->state == USB_STATE_NOTATTACHED) {
+#else
 	if (udev->state == USB_STATE_NOTATTACHED) {
+#endif
 		status = -ENODEV;
+#if defined(CONFIG_USB_DEBUG_DETAILED_LOG)
+		pr_err("%s: status %d\n", __func__, status);
+#endif
 		goto done;
 	}
+
+	trace_android_vh_usb_dev_resume(udev, msg, &bypass);
+	if (bypass)
+		goto done;
+
 	udev->can_submit = 1;
 
 	/* Resume the device */
@@ -1523,10 +1551,15 @@ static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 					udev->reset_resume);
 		}
 	}
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
+	if (!udev)
+		goto done;
+#endif
 	usb_mark_last_busy(udev);
-
- done:
+#if defined(CONFIG_USB_HOST_SAMSUNG_FEATURE)
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
+#endif
+done:
 	if (!status)
 		udev->reset_resume = 0;
 	return status;

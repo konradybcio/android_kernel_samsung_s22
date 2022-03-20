@@ -67,9 +67,13 @@ static void snd_usb_audio_stream_free(struct snd_usb_stream *stream)
 static void snd_usb_audio_pcm_free(struct snd_pcm *pcm)
 {
 	struct snd_usb_stream *stream = pcm->private_data;
+	struct snd_usb_audio *chip;
 	if (stream) {
+		mutex_lock(&stream->chip->dev_lock);
+		chip = stream->chip;
 		stream->pcm = NULL;
 		snd_usb_audio_stream_free(stream);
+		mutex_unlock(&chip->dev_lock);
 	}
 }
 
@@ -1209,6 +1213,10 @@ static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
 		usb_set_interface(chip->dev, iface_no, altno);
 		snd_usb_init_pitch(chip, iface_no, alts, fp);
 		snd_usb_init_sample_rate(chip, iface_no, alts, fp, fp->rate_max);
+#ifdef CONFIG_GKI_USB
+		if (protocol > UAC_VERSION_1)
+			snd_vendor_set_interface(chip->dev, alts, iface_no, 0);
+#endif
 	}
 	return 0;
 }

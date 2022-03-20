@@ -205,6 +205,15 @@ enum {
 	UNCHANGED	= 7,
 };
 
+/* PA Tx/Rx PWR State */
+enum {
+	OFF_STATE = 0,
+	FAST_STATE = 1,
+	SLOW_STATE = 2,
+	HIBERNATE_STATE = 3,
+	SLEEP_STATE = 4,
+};
+
 #define PWRMODE_MASK		0xF
 #define PWRMODE_RX_OFFSET	4
 
@@ -237,8 +246,10 @@ enum ufs_unipro_ver {
 	UFS_UNIPRO_VER_RESERVED = 0,
 	UFS_UNIPRO_VER_1_40 = 1, /* UniPro version 1.40 */
 	UFS_UNIPRO_VER_1_41 = 2, /* UniPro version 1.41 */
-	UFS_UNIPRO_VER_1_6 = 3,  /* UniPro version 1.6 */
-	UFS_UNIPRO_VER_MAX = 4,  /* UniPro unsupported version */
+	UFS_UNIPRO_VER_1_6  = 3, /* UniPro version 1.6 */
+	UFS_UNIPRO_VER_1_61 = 4, /* UniPro version 1.61 */
+	UFS_UNIPRO_VER_1_8  = 5, /* UniPro version 1.8 */
+	UFS_UNIPRO_VER_MAX  = 6, /* UniPro unsupported version */
 	/* UniPro version field mask in PA_LOCALVERINFO */
 	UFS_UNIPRO_VER_MASK = 0xF,
 };

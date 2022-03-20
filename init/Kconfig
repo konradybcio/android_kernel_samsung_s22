@@ -908,6 +908,11 @@ config MEMCG_SWAP
 	depends on MEMCG && SWAP
 	default y
 
+config MEMCG_FORCE_USE_VM_SWAPPINESS
+	bool "Force to use vm_swappiness instead of memcg->swappiness"
+	depends on MEMCG_SWAP
+	default y
+
 config MEMCG_KMEM
 	bool
 	depends on MEMCG && !SLOB
@@ -1190,6 +1195,28 @@ config NET_NS
 
 endif # NAMESPACES
 
+config SCHED_EMS
+	tristate "Exynos Mobile Scheduler"
+	depends on SMP
+	default n
+	help
+	  This option supports Exynos mobile scheduler. It is designed to
+	  secure the limits of energy aware scheduler. This option provides
+	  features such as independent boosting functinos such as on-time migration,
+	  and prefer_perf and enhanced prefer_idle that work in conjunction with
+	  SCHEDTUNE.
+
+	  If unsure, say N.
+
+config SCHED_EMS_TUNE
+	bool "Tuner for Exynos Mobile Scheduler"
+	depends on SCHED_EMS
+	default n
+	help
+	  This option supports tuner for Exynos mobile scheduler.
+
+	  If unsure, say N.
+
 config CHECKPOINT_RESTORE
 	bool "Checkpoint/restore support"
 	select PROC_CHILDREN
@@ -1214,6 +1241,17 @@ config SCHED_AUTOGROUP
 	  of workloads isolates aggressive CPU burners (like build jobs) from
 	  desktop applications.  Task group autogeneration is currently based
 	  upon task session.
+
+config RT_SOFTINT_OPTIMIZATION
+       bool "Improve RT scheduling during long softint execution"
+       depends on ARM64
+       depends on SMP
+       default n
+       help
+         Enable an optimization which tries to avoid placing RT tasks on CPUs
+	 occupied by nonpreemptible tasks, such as a long softint, or CPUs
+	 which may soon block preemptions, such as a CPU running a ksoftirq
+	 thread which handles slow softints.
 
 config SYSFS_DEPRECATED
 	bool "Enable deprecated sysfs features to support old userspace tools"
@@ -1621,6 +1659,11 @@ config HAVE_ARCH_USERFAULTFD_WP
 	bool
 	help
 	  Arch has userfaultfd write protection support
+
+config HAVE_ARCH_USERFAULTFD_MINOR
+	bool
+	help
+	  Arch has userfaultfd minor fault support
 
 config MEMBARRIER
 	bool "Enable membarrier() system call" if EXPERT
@@ -2141,6 +2184,20 @@ config MODULE_SRCVERSION_ALL
 	  the version).  With this option, such a "srcversion" field
 	  will be created for all modules.  If unsure, say N.
 
+config MODULE_SCMVERSION
+	bool "SCM version for modules"
+	depends on LOCALVERSION_AUTO
+	help
+	  This enables the module attribute "scmversion" which can be used
+	  by developers to identify the SCM version of a given module, e.g.
+	  git sha1 or hg sha1. The SCM version can be queried by modinfo or
+	  via the sysfs node: /sys/modules/MODULENAME/scmversion. This is
+	  useful when the kernel or kernel modules are updated separately
+	  since that causes the vermagic of the kernel and the module to
+	  differ.
+
+	  If unsure, say N.
+
 config MODULE_SIG
 	bool "Module signature verification"
 	select MODULE_SIG_FORMAT
@@ -2317,11 +2374,17 @@ config UNUSED_KSYMS_WHITELIST
 	  one per line. The path can be absolute, or relative to the kernel
 	  source tree.
 
+config KMI_SYMBOL_LISTS
+	string "KMI symbol lists to keep in ksymtab"
+	help
+	  By default, all unused exported symbols will be un-exported from the
+	  build when TRIM_UNUSED_KSYMS is selected.
+
 endif # MODULES
 
 config MODULES_TREE_LOOKUP
 	def_bool y
-	depends on PERF_EVENTS || TRACING
+	depends on PERF_EVENTS || TRACING || CFI_CLANG
 
 config INIT_ALL_POSSIBLE
 	bool
@@ -2366,3 +2429,5 @@ config ARCH_HAS_SYNC_CORE_BEFORE_USERMODE
 # <asm/syscall_wrapper.h>.
 config ARCH_HAS_SYSCALL_WRAPPER
 	def_bool n
+
+source "init/Kconfig.gki"

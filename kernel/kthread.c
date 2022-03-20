@@ -28,6 +28,7 @@
 #include <linux/uaccess.h>
 #include <linux/numa.h>
 #include <linux/sched/isolation.h>
+#include <linux/sec_debug.h>
 #include <trace/events/sched.h>
 
 
@@ -354,20 +355,25 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
 	 * the OOM killer while kthreadd is trying to allocate memory for
 	 * new kernel thread.
 	 */
+	secdbg_dtsk_built_set_data(DTYPE_KTHREAD, kthreadd_task);
 	if (unlikely(wait_for_completion_killable(&done))) {
 		/*
 		 * If I was SIGKILLed before kthreadd (or new kernel thread)
 		 * calls complete(), leave the cleanup of this structure to
 		 * that thread.
 		 */
-		if (xchg(&create->done, NULL))
+		if (xchg(&create->done, NULL)) {
+			secdbg_dtsk_built_clear_data();
 			return ERR_PTR(-EINTR);
+		}
 		/*
 		 * kthreadd (or new kernel thread) will call complete()
 		 * shortly.
 		 */
 		wait_for_completion(&done);
 	}
+	secdbg_dtsk_built_clear_data();
+
 	task = create->result;
 	if (!IS_ERR(task)) {
 		static const struct sched_param param = { .sched_priority = 0 };
@@ -455,6 +461,7 @@ void kthread_bind_mask(struct task_struct *p, const struct cpumask *mask)
 {
 	__kthread_bind_mask(p, mask, TASK_UNINTERRUPTIBLE);
 }
+EXPORT_SYMBOL_GPL(kthread_bind_mask);
 
 /**
  * kthread_bind - bind a just-created kthread to a cpu.
@@ -618,7 +625,9 @@ int kthread_stop(struct task_struct *k)
 	set_bit(KTHREAD_SHOULD_STOP, &kthread->flags);
 	kthread_unpark(k);
 	wake_up_process(k);
+	secdbg_dtsk_built_set_data(DTYPE_KTHREAD, k);
 	wait_for_completion(&kthread->exited);
+	secdbg_dtsk_built_clear_data();
 	ret = k->exit_code;
 	put_task_struct(k);
 
@@ -936,7 +945,13 @@ static void __kthread_queue_delayed_work(struct kthread_worker *worker,
 	struct timer_list *timer = &dwork->timer;
 	struct kthread_work *work = &dwork->work;
 
-	WARN_ON_ONCE(timer->function != kthread_delayed_work_timer_fn);
+	/*
+	 * With CFI, timer->function can point to a jump table entry in a module,
+	 * which fails the comparison. Disable the warning if CFI and modules are
+	 * both enabled.
+	 */
+	if (!IS_ENABLED(CONFIG_CFI_CLANG) || !IS_ENABLED(CONFIG_MODULES))
+		WARN_ON_ONCE(timer->function != kthread_delayed_work_timer_fn);
 
 	/*
 	 * If @delay is 0, queue @dwork->work immediately.  This is for
@@ -1132,6 +1147,19 @@ bool kthread_mod_delayed_work(struct kthread_worker *worker,
 		goto out;
 
 	ret = __kthread_cancel_work(work, true, &flags);
+
+	/*
+	 * Canceling could run in parallel from kthread_cancel_delayed_work_sync
+	 * and change work's canceling count as the spinlock is released and regain
+	 * in __kthread_cancel_work so we need to check the count again. Otherwise,
+	 * we might incorrectly queue the dwork and further cause
+	 * cancel_delayed_work_sync thread waiting for flush dwork endlessly.
+	 */
+	if (work->canceling) {
+		ret = false;
+		goto out;
+	}
+
 fast_queue:
 	__kthread_queue_delayed_work(worker, dwork, delay);
 out:

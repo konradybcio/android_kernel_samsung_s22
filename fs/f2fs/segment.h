@@ -172,12 +172,10 @@ enum {
 /*
  * BG_GC means the background cleaning job.
  * FG_GC means the on-demand cleaning job.
- * FORCE_FG_GC means on-demand cleaning job in background.
  */
 enum {
 	BG_GC = 0,
 	FG_GC,
-	FORCE_FG_GC,
 };
 
 /* for a function parameter to select a victim segment */
@@ -296,6 +294,9 @@ struct dirty_seglist_info {
 	struct mutex seglist_lock;		/* lock for segment bitmaps */
 	int nr_dirty[NR_DIRTY_TYPE];		/* # of dirty segments */
 	unsigned long *victim_secmap;		/* background GC victims */
+
+	/* W/A for FG_GC failure due to Atomic Write File and Pinned File */
+	unsigned long *unable_victim_secmap; /* GC Failed Bitmap */
 };
 
 /* victim selection function for cleaning and SSR */
@@ -656,6 +657,9 @@ static inline int utilization(struct f2fs_sb_info *sbi)
 #define DEF_MIN_IPU_UTIL	70
 #define DEF_MIN_FSYNC_BLOCKS	8
 #define DEF_MIN_HOT_BLOCKS	16
+
+#define DEF_DISCARD_SLAB_THRESHOLD (4)		/* 4MB */
+#define DEF_UNDISCARD_THRESHOLD (128)		/* 128MB */
 
 #define SMALL_VOLUME_SEGMENTS	(16 * 512)	/* 16GB */
 
